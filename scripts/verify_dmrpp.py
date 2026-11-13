@@ -86,7 +86,8 @@ from typing import Any
 CMR = "https://cmr.earthdata.nasa.gov/search/granules.umm_json"
 FIELDS = ["verdict", "provider", "short_name", "granule_ur", "file_format", "data_newer_by_days", "variables_compared", "chunks_compared",
           "chunks_mismatched", "variables_mismatched", "only_in_sidecar", "only_in_file", "file_size", "sidecar_max_byte",
-          "first_mismatch", "metadata_differences", "filter_order_differs", "hyrax_values", "hyrax_detail", "data_url"]
+          "first_mismatch", "metadata_differences", "filter_order_differs", "int8_declared_int16", "file_int8_variables",
+          "sidecar_version", "sidecar_cf_markers", "sidecar_hdf5_global", "sidecar_int8_variables", "hyrax_values", "hyrax_detail", "data_url"]
 HYRAX = "https://opendap.earthdata.nasa.gov"
 HYRAX_TIMEOUT_S = 120  # per request; a slow or failing Hyrax answer is recorded, not waited on
 FILTER_NAMES = {"zlib": "deflate", "gzip": "deflate", "deflate": "deflate", "shuffle": "shuffle", "fletcher32": "fletcher32", "zstd": "zstd", "blosc": "blosc", "lz4": "lz4"}
@@ -279,9 +280,12 @@ def verify(
     row: dict[str, str], access: Access, traceback_wanted: bool = False, values: str = "none", value_variables: int = 3,
     value_edge: int = 256,
 ) -> dict[str, Any]:
+    from xml.etree import ElementTree
+
     import obstore
     from obspec_utils.registry import ObjectStoreRegistry
-    from virtualizarr.parsers import DMRPPParser, HDFParser
+    from virtualizarr.parsers import HDFParser
+    from virtualizarr.parsers.dmrpp import DMRParser
 
     out: dict[str, Any] = {
         "provider": row.get("provider"), "short_name": row.get("short_name"), "granule_ur": row.get("granule_ur"), "data_url": row["data_url"],
@@ -308,15 +312,22 @@ def verify(
         file_group = file_parser(url, registry)._group
         file_meta = describe(file_group)
         stage = "reading the sidecar"
+        sidecar_text = bytes(obstore.get(store, key + ".dmrpp").bytes())
+        out.update(sidecar_signs(sidecar_text))
+        out["file_int8_variables"] = sum(m["dtype"].startswith("Int8") for m in file_meta.values())
+        sidecar_root = ElementTree.fromstring(sidecar_text)
         # the sidecar parser returns one group per call, so ask for each group the file has
         sidecar_index: dict[str, dict[str, dict[str, Any]]] = {}
         sidecar_meta: dict[str, dict[str, Any]] = {}
         for path in group_paths(file_group) or [""]:
-            part = DMRPPParser(group=path or None)(url + ".dmrpp", registry)._group
+            part = DMRParser(root=sidecar_root, data_filepath=url).parse_dataset(object_store=store, group=path or "/")._group
             sidecar_index.update(manifests(part, path, recurse=False))
             sidecar_meta.update(describe(part, path, recurse=False))
         stage = "comparing"
         out.update(compare(sidecar_index, manifests(file_group), size, sidecar_meta, file_meta))
+        out["int8_declared_int16"] = sum(
+            file_meta[n]["dtype"].startswith("Int8") and sidecar_meta[n]["dtype"].startswith("Int16") for n in set(file_meta) & set(sidecar_meta)
+        )
     except Exception as error:  # noqa: BLE001 -- one unreadable granule is a row, not the end of the run
         out["verdict"] = f"error {stage}: {type(error).__name__}: {' '.join(str(error).split())[:200]}"
         if traceback_wanted:
@@ -337,6 +348,23 @@ def verify(
 
                 traceback.print_exc()
     return out
+
+
+def sidecar_signs(text: bytes) -> dict[str, Any]:
+    """How a sidecar's variable descriptions appear to have been produced, from its text alone.
+
+    ``sidecar_cf_markers`` counts the ``fullnamepath`` attributes: older sidecars
+    carry one per variable, newer ones none. The hypothesis under test is that
+    those older sidecars are the ones that declare signed 8-bit data as Int16."""
+    import re
+
+    version = re.search(rb'dmrpp:version="([^"]+)"', text)
+    return {
+        "sidecar_version": version.group(1).decode() if version else "",
+        "sidecar_cf_markers": text.count(b'name="fullnamepath"'),
+        "sidecar_hdf5_global": b'name="HDF5_GLOBAL"' in text,
+        "sidecar_int8_variables": len(re.findall(rb"<Int8 name=", text)),
+    }
 
 
 def granule_identity(row: dict[str, str]) -> tuple[str, str]:
@@ -511,6 +539,7 @@ def main(argv: list[str] | None = None) -> int:
         writer.writeheader()
     tally: dict[str, int] = defaultdict(int)
     hyrax: dict[str, int] = defaultdict(int)
+    cross: dict[tuple[str, str], int] = defaultdict(int)
     for index, row in enumerate(rows, 1):
         if index < args.start:
             continue
@@ -518,6 +547,9 @@ def main(argv: list[str] | None = None) -> int:
         tally["error" if result["verdict"].startswith("error") else result["verdict"]] += 1
         detail = f"{result.get('chunks_mismatched')} of {result.get('chunks_compared')} chunks differ" if "chunks_compared" in result else ""
         print(f"[{index}/{len(rows)}] {result['verdict']:<18} {result.get('short_name') or ''} {row['data_url'].rsplit('/', 1)[-1]} {detail}", flush=True)
+        if "sidecar_cf_markers" in result and result.get("file_int8_variables") is not None:
+            wrong = "8-bit declared as Int16" if result.get("int8_declared_int16") else ("8-bit declared correctly" if result["file_int8_variables"] else "no signed 8-bit variables")
+            cross[("older sidecar (has fullnamepath)" if result["sidecar_cf_markers"] else "newer sidecar (no fullnamepath)", wrong)] += 1
         for note in (result.get("first_mismatch"), result.get("metadata_differences")):
             if note:
                 print(f"      {note}", flush=True)
@@ -530,6 +562,10 @@ def main(argv: list[str] | None = None) -> int:
     if sink:
         sink.close()
     print("\n" + ", ".join(f"{k}: {v}" for k, v in sorted(tally.items())))
+    if cross:
+        print("\nSidecar kind against how it declares the file's signed 8-bit variables:")
+        for (kind, outcome), n in sorted(cross.items()):
+            print(f"  {kind:36s} {outcome:28s} {n}")
     if hyrax:
         print("Hyrax values: " + ", ".join(f"{k}: {v}" for k, v in sorted(hyrax.items())))
     if hyrax.get("DIFFERENT"):
