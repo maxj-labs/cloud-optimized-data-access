@@ -197,11 +197,11 @@ def compare(
     }
 
 
-def pick(rows: list[dict[str, str]], per_collection: int, min_gap_days: float, limit: int | None, seed: int = 0) -> list[dict[str, str]]:
+def pick(rows: list[dict[str, str]], per_collection: int, min_gap_days: float | None, limit: int | None, seed: int = 0) -> list[dict[str, str]]:
     """Up to ``per_collection`` granules from each collection, largest gaps first across collections."""
     by: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in rows:
-        if float(row.get("data_newer_by_s") or 0) >= min_gap_days * 86400:
+        if min_gap_days is None or float(row.get("data_newer_by_s") or 0) >= min_gap_days * 86400:
             by[row["concept_id"]].append(row)
     rng = random.Random(seed)
     chosen = []
@@ -508,7 +508,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("inputs", nargs="+", help="stale_granules.csv, or data file URLs")
     p.add_argument("--transport", choices=("s3", "https"), default="s3", help="s3: direct, from us-west-2 (default); https: the DAAC endpoint, from anywhere")
     p.add_argument("--per-collection", type=int, default=2, help="granules to check per collection (CSV input)")
-    p.add_argument("--min-gap-days", type=float, default=0.0, help="only granules whose data file is at least this much newer than its sidecar")
+    p.add_argument("--min-gap-days", type=float, default=None, help="only granules whose data file is at least this much newer than its sidecar (default: no filter)")
+    p.add_argument("--provider", nargs="*", help="only these providers from the CSV, e.g. POCLOUD")
     p.add_argument("--collection", nargs="*", help="only these collections (short names or concept ids) from the CSV")
     p.add_argument("--limit", type=int, help="stop after this many granules")
     p.add_argument("--values", nargs="?", const="mismatch", default="none", choices=("none", "mismatch", "all"),
@@ -525,6 +526,8 @@ def main(argv: list[str] | None = None) -> int:
         if item.endswith(".csv"):
             with open(item, newline="") as f:
                 found = [normalise(r) for r in csv.DictReader(f)]
+            if args.provider:
+                found = [r for r in found if r.get("provider") in args.provider]
             if args.collection:
                 found = [r for r in found if r.get("short_name") in args.collection or r.get("concept_id") in args.collection]
             rows += pick(found, args.per_collection, args.min_gap_days, None)

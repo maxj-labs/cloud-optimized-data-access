@@ -128,3 +128,9 @@ def test_sidecar_signs_are_read_from_the_text():
     new = b'<Dataset name="a.nc" dmrpp:version="3.20.9-91"><Int8 name="mask"/><Int8 name="ice"/></Dataset>'
     assert verify.sidecar_signs(old) == {"sidecar_version": "", "sidecar_cf_markers": 1, "sidecar_hdf5_global": True, "sidecar_int8_variables": 0}
     assert verify.sidecar_signs(new) == {"sidecar_version": "3.20.9-91", "sidecar_cf_markers": 0, "sidecar_hdf5_global": False, "sidecar_int8_variables": 2}
+
+
+def test_pick_without_a_gap_filter_keeps_files_older_than_their_sidecar():
+    rows = [{"concept_id": "C1", "data_newer_by_s": "-9", "granule_ur": "fresh"}, {"concept_id": "C2", "data_newer_by_s": "", "granule_ur": "unknown"}]
+    assert len(verify.pick(rows, per_collection=1, min_gap_days=None, limit=None)) == 2
+    assert verify.pick(rows, per_collection=1, min_gap_days=0, limit=None) == [rows[1]]
