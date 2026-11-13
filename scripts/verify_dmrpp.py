@@ -20,9 +20,12 @@ the two chunk by chunk. Only metadata is read; no science data moves.
     uv run verify_dmrpp.py stale_granules.csv --transport https             # anywhere, slower
     uv run verify_dmrpp.py https://archive.podaac.earthdata.nasa.gov/.../file.nc --transport https
 
-The CSV is ``results/dmrpp_staleness/stale_granules.csv`` (columns used:
-provider, short_name, concept_id, granule_ur, data_url, dmrpp_url,
-data_newer_by_s). A bare URL is a data file's; its sidecar is ``<url>.dmrpp``.
+The CSV is either inventory's list of stale files: the sampler's
+``stale_granules.csv`` or the listing script's ``stale.csv``. ``--collection``
+keeps only the named collections. A bare URL is a data file's; its sidecar
+is ``<url>.dmrpp``.
+
+    uv run verify_dmrpp.py stale.csv --collection L3S_LEO_PM-STAR-v2.81 --min-gap-days 1 --per-collection 10
 
 Needs an Earthdata login: ``EARTHDATA_TOKEN``, or ``EARTHDATA_USERNAME`` and
 ``EARTHDATA_PASSWORD``, or a netrc entry.
@@ -111,6 +114,15 @@ def pick(rows: list[dict[str, str]], per_collection: int, min_gap_days: float, l
     return chosen[:limit] if limit else chosen
 
 
+def normalise(row: dict[str, str]) -> dict[str, str]:
+    """Accept the listing script's stale.csv too: its rows carry ``bucket`` and ``path`` instead of ``data_url``."""
+    if not row.get("data_url") and row.get("bucket") and row.get("path"):
+        row = {**row, "data_url": f"s3://{row['bucket']}/{row['path']}"}
+    if not row.get("provider"):
+        row = {**row, "provider": (row.get("concept_id") or "").rpartition("-")[2]}
+    return row
+
+
 def s3_url(row: dict[str, str]) -> str:
     """The granule's s3:// link from CMR; the HTTPS URL's first path segment as the bucket if CMR has none."""
     name = row["data_url"].rsplit("/", 1)[-1]
@@ -191,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--transport", choices=("s3", "https"), default="s3", help="s3: direct, from us-west-2 (default); https: the DAAC endpoint, from anywhere")
     p.add_argument("--per-collection", type=int, default=2, help="granules to check per collection (CSV input)")
     p.add_argument("--min-gap-days", type=float, default=0.0, help="only granules whose data file is at least this much newer than its sidecar")
+    p.add_argument("--collection", nargs="*", help="only these collections (short names or concept ids) from the CSV")
     p.add_argument("--limit", type=int, help="stop after this many granules")
     p.add_argument("--out", help="write verdicts to this CSV as well as the screen")
     args = p.parse_args(argv)
@@ -199,7 +212,10 @@ def main(argv: list[str] | None = None) -> int:
     for item in args.inputs:
         if item.endswith(".csv"):
             with open(item, newline="") as f:
-                rows += pick(list(csv.DictReader(f)), args.per_collection, args.min_gap_days, None)
+                found = [normalise(r) for r in csv.DictReader(f)]
+            if args.collection:
+                found = [r for r in found if r.get("short_name") in args.collection or r.get("concept_id") in args.collection]
+            rows += pick(found, args.per_collection, args.min_gap_days, None)
         else:
             rows.append({"data_url": item, "provider": os.environ.get("CMR_PROVIDER", "")})
     rows = rows[: args.limit] if args.limit else rows

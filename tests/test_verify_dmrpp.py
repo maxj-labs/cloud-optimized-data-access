@@ -52,3 +52,11 @@ def test_pick_takes_a_few_per_collection_largest_gaps_first():
     chosen = verify.pick(rows, per_collection=2, min_gap_days=0.5, limit=None)
     assert chosen[0]["granule_ur"] == "b" and len(chosen) == 3 and all(r["concept_id"] != "C3" for r in chosen)
     assert len(verify.pick(rows, per_collection=2, min_gap_days=0, limit=2)) == 2
+
+
+def test_the_listing_scripts_rows_are_accepted():
+    row = verify.normalise({"concept_id": "C1-POCLOUD", "short_name": "X", "bucket": "b", "path": "X/f.nc", "data_newer_by_s": "90000"})
+    assert row["data_url"] == "s3://b/X/f.nc" and row["provider"] == "POCLOUD"
+    assert verify.pick([row], per_collection=1, min_gap_days=1, limit=None) == [row]
+    kept = verify.normalise({"provider": "P", "data_url": "https://h/f.nc", "concept_id": "C2-Q"})
+    assert kept["data_url"] == "https://h/f.nc" and kept["provider"] == "P"

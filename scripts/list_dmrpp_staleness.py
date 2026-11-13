@@ -156,6 +156,7 @@ def summary_row(result: dict[str, Any], requests: int, seconds: float, truncated
         "without_sidecar": result["without_sidecar"], "orphan_sidecars": result["orphan_sidecars"], "stale": len(stale),
         "stale_over_1_day": sum(g >= 86400 for g in gaps), "stale_over_30_days": sum(g >= 30 * 86400 for g in gaps),
         "max_gap_days": round(max(gaps, default=0) / 86400, 2), "busiest_month": months[0][0] if months else "",
+        "stale_in_other_months": len(stale) - (months[0][1] if months else 0),
         "listing_requests": requests, "seconds": round(seconds, 1), "truncated": truncated,
     }
 
@@ -202,7 +203,7 @@ def targets(args: argparse.Namespace) -> list[dict[str, str]]:
 
 STALE_FIELDS = ["concept_id", "short_name", "bucket", "path", "data_last_modified", "dmrpp_last_modified", "data_newer_by_s", "data_size", "dmrpp_size"]
 SUMMARY_FIELDS = ["concept_id", "short_name", "provider", "prefix", "error", "objects", "data_files", "with_sidecar", "without_sidecar", "orphan_sidecars",
-                  "stale", "stale_over_1_day", "stale_over_30_days", "max_gap_days", "busiest_month", "listing_requests", "seconds", "truncated"]
+                  "stale", "stale_over_1_day", "stale_over_30_days", "max_gap_days", "busiest_month", "stale_in_other_months", "listing_requests", "seconds", "truncated"]
 
 
 def main(argv: list[str] | None = None) -> int:
