@@ -8,6 +8,7 @@
 #     "xarray==2026.9.0",
 #     "zarr==3.4.1",
 #     "earthaccess==0.19.0",
+#     "scipy==1.18.1",
 # ]
 # ///
 """Is a DMR++ sidecar still right for the file beside it?
@@ -36,9 +37,10 @@ Verdicts, one row per granule:
 - ``MISMATCH``: at least one chunk differs. The sidecar points at the wrong bytes.
 - ``SIDECAR_PAST_END``: the sidecar references bytes beyond the end of the file.
 - ``nothing_to_compare``: no chunked variable appears on both sides.
-- ``not_hdf5``: the file is netCDF classic or HDF4; the file-side parser reads
-  HDF5 and netCDF-4 only, so this script cannot judge it.
-- ``error: ...``: the file or sidecar could not be read.
+- ``not_hdf5``: the file is HDF4 or another format with no file-side parser
+  here. HDF5, netCDF-4 and netCDF classic files are all judged.
+- ``error <stage>: ...``: a failure, with the step it happened in (reading the
+  sidecar, or reading the file's own index). ``--traceback`` prints it in full.
 
 Variables only one side lists are counted, not failed: a sidecar may inline
 small variables and omit chunks that are all fill value.
@@ -58,7 +60,7 @@ from collections import defaultdict
 from typing import Any
 
 CMR = "https://cmr.earthdata.nasa.gov/search/granules.umm_json"
-FIELDS = ["verdict", "provider", "short_name", "granule_ur", "data_newer_by_days", "variables_compared", "chunks_compared",
+FIELDS = ["verdict", "provider", "short_name", "granule_ur", "file_format", "data_newer_by_days", "variables_compared", "chunks_compared",
           "chunks_mismatched", "variables_mismatched", "only_in_sidecar", "only_in_file", "file_size", "sidecar_max_byte",
           "first_mismatch", "data_url"]
 
@@ -173,7 +175,7 @@ class Access:
         return url, (f"s3://{bucket}", self._stores[bucket])
 
 
-def verify(row: dict[str, str], access: Access) -> dict[str, Any]:
+def verify(row: dict[str, str], access: Access, traceback_wanted: bool = False) -> dict[str, Any]:
     import obstore
     from obspec_utils.registry import ObjectStoreRegistry
     from virtualizarr.parsers import DMRPPParser, HDFParser
@@ -182,18 +184,34 @@ def verify(row: dict[str, str], access: Access) -> dict[str, Any]:
         "provider": row.get("provider"), "short_name": row.get("short_name"), "granule_ur": row.get("granule_ur"), "data_url": row["data_url"],
         "data_newer_by_days": round(float(row["data_newer_by_s"]) / 86400, 2) if row.get("data_newer_by_s") else None,
     }
+    stage = "locating the file"
     try:
         url, (root, store) = access.locate(row)
         registry = ObjectStoreRegistry({root: store})
-        size = int(obstore.head(store, url[len(root):].lstrip("/"))["size"])
+        key = url[len(root):].lstrip("/")
+        size = int(obstore.head(store, key)["size"])
+        magic = bytes(obstore.get_range(store, key, start=0, end=8))
+        if magic.startswith(b"CDF"):
+            from virtualizarr.parsers import NetCDF3Parser
+
+            file_parser, out["file_format"] = NetCDF3Parser(), "netCDF classic"
+        elif magic.startswith(b"\x89HDF"):
+            file_parser, out["file_format"] = HDFParser(), "HDF5"
+        else:
+            out["verdict"] = "not_hdf5"  # HDF4 or something else: no file-side parser here can index it
+            return out
+        stage = "reading the sidecar"
         from_sidecar = manifests(DMRPPParser()(url + ".dmrpp", registry)._group)
-        from_file = manifests(HDFParser()(url, registry)._group)
+        stage = "reading the file's own index"
+        from_file = manifests(file_parser(url, registry)._group)
+        stage = "comparing"
         out.update(compare(from_sidecar, from_file, size))
     except Exception as error:  # noqa: BLE001 -- one unreadable granule is a row, not the end of the run
-        if "file signature not found" in str(error):
-            out["verdict"] = "not_hdf5"  # netCDF classic or HDF4: the file-side parser cannot index it
-        else:
-            out["verdict"] = f"error: {type(error).__name__}: {str(error)[:200]}"
+        out["verdict"] = f"error {stage}: {type(error).__name__}: {str(error)[:200]}"
+        if traceback_wanted:
+            import traceback
+
+            traceback.print_exc()
     return out
 
 
@@ -205,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--min-gap-days", type=float, default=0.0, help="only granules whose data file is at least this much newer than its sidecar")
     p.add_argument("--collection", nargs="*", help="only these collections (short names or concept ids) from the CSV")
     p.add_argument("--limit", type=int, help="stop after this many granules")
+    p.add_argument("--traceback", action="store_true", help="print the full traceback when a granule errors")
     p.add_argument("--out", help="write verdicts to this CSV as well as the screen")
     args = p.parse_args(argv)
 
@@ -227,8 +246,8 @@ def main(argv: list[str] | None = None) -> int:
         writer.writeheader()
     tally: dict[str, int] = defaultdict(int)
     for index, row in enumerate(rows, 1):
-        result = verify(row, access)
-        tally[result["verdict"].split(":")[0]] += 1
+        result = verify(row, access, args.traceback)
+        tally["error" if result["verdict"].startswith("error") else result["verdict"]] += 1
         detail = f"{result.get('chunks_mismatched')} of {result.get('chunks_compared')} chunks differ" if "chunks_compared" in result else ""
         print(f"[{index}/{len(rows)}] {result['verdict']:<18} {result.get('short_name') or ''} {row['data_url'].rsplit('/', 1)[-1]} {detail}", flush=True)
         if result.get("first_mismatch"):
