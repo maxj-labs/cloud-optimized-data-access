@@ -9,6 +9,8 @@ group.
 | Path | What |
 |---|---|
 | `benchmarks/tempo_no2/` | TEMPO NO₂ event access: file-based netCDF vs the same bytes through a virtual Zarr (Icechunk) store. Protocol in its README. |
+| `benchmarks/trade_study/` | Minimum viable harness for the trade study's full scope: any dataset and arm, time to first byte in parts, a correctness gate, superchunk bounds. Runs without credentials on public GOES-19. Status and protocol in its README. |
+| `results/trade_study/` | Its committed runs, probes, gate verdicts and superchunk tables. |
 | `results/tempo_no2/` | Committed results, one directory per run, with provenance. `latest.json` names the run the deck shows. |
 | `decks/coda-presentation/` | Slidev deck skeleton (placeholder title). Reads its numbers from `results/`. |
 

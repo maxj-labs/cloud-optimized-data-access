@@ -237,3 +237,6 @@ Thumbs.db
 
 # never commit binary coordinate dumps; the manifest records the grid
 *.npz
+
+# locally built virtual stores (rebuild with `run.py build-store`)
+benchmarks/trade_study/stores/
