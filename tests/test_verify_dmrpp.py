@@ -100,3 +100,16 @@ def test_same_values_treats_nan_as_equal_and_shape_as_part_of_the_answer():
     assert verify.same_values(a, a.copy()) and not verify.same_values(a, np.array([1.0, 2.0]))
     assert not verify.same_values(np.zeros((2, 1)), np.zeros(2))
     assert verify.same_values(np.array([1, 2], dtype="int16"), np.array([1, 2], dtype="int32"))
+
+
+def test_groups_are_listed_and_metadata_mismatches_are_value_checked_before_other_variables():
+    array = SimpleNamespace(manifest=SimpleNamespace(dict=lambda: {"0": chunk(1, 2)}))
+    leaf = SimpleNamespace(arrays={"v": array}, groups={})
+    root = SimpleNamespace(arrays={}, groups={"data_01": SimpleNamespace(arrays={"t": array}, groups={"ku": leaf})})
+    assert verify.group_paths(root) == ["/data_01", "/data_01/ku"]
+    assert set(verify.manifests(root.groups["data_01"], "/data_01", recurse=False)) == {"/data_01/t"}
+    index = {"/sst": {"0": chunk(0, 10)}, "/mask": {"0": chunk(10, 10)}}
+    described = {"/sst": meta(), "/mask": meta(dtype="Int8()")}
+    out = verify.compare(index, index, 100, {"/sst": meta(), "/mask": meta(dtype="Int16(endianness='little')")}, described)
+    assert out["verdict"] == "METADATA_MISMATCH" and out["mismatched_variables"] == ["/mask"]
+    assert "/mask dtype: sidecar Int16 little, file Int8" in out["metadata_differences"]

@@ -88,11 +88,19 @@ HYRAX = "https://opendap.earthdata.nasa.gov"
 FILTER_NAMES = {"zlib": "deflate", "gzip": "deflate", "deflate": "deflate", "shuffle": "shuffle", "fletcher32": "fletcher32", "zstd": "zstd", "blosc": "blosc", "lz4": "lz4"}
 
 
-def manifests(group: Any, prefix: str = "") -> dict[str, dict[str, dict[str, Any]]]:
+def manifests(group: Any, prefix: str = "", recurse: bool = True) -> dict[str, dict[str, dict[str, Any]]]:
     """{variable path: {chunk key: {path, offset, length}}} for every array under a ManifestGroup."""
     out = {f"{prefix}/{name}": array.manifest.dict() for name, array in group.arrays.items()}
-    for name, child in group.groups.items():
+    for name, child in group.groups.items() if recurse else ():
         out.update(manifests(child, f"{prefix}/{name}"))
+    return out
+
+
+def group_paths(group: Any, prefix: str = "") -> list[str]:
+    """Paths of every group that holds arrays ("" is the root)."""
+    out = [prefix] if group.arrays else []
+    for name, child in group.groups.items():
+        out += group_paths(child, f"{prefix}/{name}")
     return out
 
 
@@ -108,13 +116,13 @@ def filters(metadata: Any) -> list[str]:
     return names
 
 
-def describe(group: Any, prefix: str = "") -> dict[str, dict[str, Any]]:
+def describe(group: Any, prefix: str = "", recurse: bool = True) -> dict[str, dict[str, Any]]:
     """{variable path: shape, data type, chunk shape and filters} for every array under a ManifestGroup."""
     out = {}
     for name, array in group.arrays.items():
         m = array.metadata
         out[f"{prefix}/{name}"] = {"shape": tuple(m.shape), "dtype": str(m.data_type), "chunks": tuple(m.chunk_grid.chunk_shape), "filters": filters(m)}
-    for name, child in group.groups.items():
+    for name, child in group.groups.items() if recurse else ():
         out.update(describe(child, f"{prefix}/{name}"))
     return out
 
@@ -130,12 +138,18 @@ def compare_metadata(sidecar: dict[str, dict[str, Any]], file: dict[str, dict[st
         a, b = sidecar[name], file[name]
         for key in ("shape", "dtype", "chunks"):
             if a[key] != b[key]:
-                differences.append(f"{name} {key}: sidecar {a[key]}, file {b[key]}")
+                differences.append(f"{name} {key}: sidecar {short(a[key])}, file {short(b[key])}")
         if sorted(a["filters"]) != sorted(b["filters"]):
             differences.append(f"{name} filters: sidecar {a['filters']}, file {b['filters']}")
         elif a["filters"] != b["filters"]:
             reordered += 1
     return differences, reordered
+
+
+def short(value: Any) -> str:
+    """Float64(endianness='little') → Float64 little; anything else as it is."""
+    text = str(value)
+    return text.replace("(endianness='", " ").replace("')", "").replace("()", "") if "endianness" in text or text.endswith("()") else text
 
 
 def compare(
@@ -172,7 +186,9 @@ def compare(
         "variables_mismatched": len(bad_variables), "only_in_sidecar": len(set(sidecar) - set(file)), "only_in_file": len(set(file) - set(sidecar)),
         "file_size": file_size, "sidecar_max_byte": max_byte, "first_mismatch": first,
         "metadata_differences": "; ".join(differences[:5]) + (f"; and {len(differences) - 5} more" if len(differences) > 5 else ""),
-        "filter_order_differs": reordered, "mismatched_variables": bad_variables,
+        "filter_order_differs": reordered,
+        # for the value check: variables whose bytes are wrong first, then those the sidecar describes differently
+        "mismatched_variables": bad_variables + [n for n in dict.fromkeys(d.split(" ", 1)[0] for d in differences) if n not in bad_variables],
     }
 
 
@@ -288,9 +304,15 @@ def verify(
         file_group = file_parser(url, registry)._group
         file_meta = describe(file_group)
         stage = "reading the sidecar"
-        sidecar_group = DMRPPParser()(url + ".dmrpp", registry)._group
+        # the sidecar parser returns one group per call, so ask for each group the file has
+        sidecar_index: dict[str, dict[str, dict[str, Any]]] = {}
+        sidecar_meta: dict[str, dict[str, Any]] = {}
+        for path in group_paths(file_group) or [""]:
+            part = DMRPPParser(group=path or None)(url + ".dmrpp", registry)._group
+            sidecar_index.update(manifests(part, path, recurse=False))
+            sidecar_meta.update(describe(part, path, recurse=False))
         stage = "comparing"
-        out.update(compare(manifests(sidecar_group), manifests(file_group), size, describe(sidecar_group), file_meta))
+        out.update(compare(sidecar_index, manifests(file_group), size, sidecar_meta, file_meta))
     except Exception as error:  # noqa: BLE001 -- one unreadable granule is a row, not the end of the run
         out["verdict"] = f"error {stage}: {type(error).__name__}: {' '.join(str(error).split())[:200]}"
         if traceback_wanted:
