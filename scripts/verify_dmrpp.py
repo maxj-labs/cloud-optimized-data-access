@@ -33,8 +33,11 @@ Needs an Earthdata login: ``EARTHDATA_TOKEN``, or ``EARTHDATA_USERNAME`` and
 
 Verdicts, one row per granule:
 
-- ``match``: every chunk both sides list has the same offset and length.
+- ``match``: every chunk both sides list has the same offset and length, and
+  every shared variable has the same shape, data type, chunk shape and filters.
 - ``MISMATCH``: at least one chunk differs. The sidecar points at the wrong bytes.
+- ``METADATA_MISMATCH``: the bytes line up but the sidecar describes them
+  differently (shape, data type, chunk shape or the set of filters).
 - ``SIDECAR_PAST_END``: the sidecar references bytes beyond the end of the file.
 - ``nothing_to_compare``: no chunked variable appears on both sides.
 - ``not_hdf5``: the file is HDF4 or another format with no file-side parser
@@ -44,6 +47,24 @@ Verdicts, one row per granule:
 
 Variables only one side lists are counted, not failed: a sidecar may inline
 small variables and omit chunks that are all fill value.
+
+``--values`` then asks the question a user cares about: does the service
+return the right numbers? For each chosen granule it requests up to
+``--value-variables`` variables from Hyrax (OPeNDAP) and compares them with
+a direct read of the file. The ``hyrax_values`` column is one of:
+
+- ``identical``: every variable checked equals the direct read.
+- ``DIFFERENT``: Hyrax answered with other numbers and no error. This is
+  silent wrong data.
+- ``hyrax error: ...``: the request failed, with Hyrax's message. Loud.
+- ``skipped: ...``: nothing could be compared, with the reason.
+
+``--values mismatch`` (the default when the flag is given bare) checks only
+granules that did not come back ``match``; ``--values all`` checks every
+granule, which is how a random sample of healthy files becomes a control.
+
+The exit code is 2 if any granule is ``DIFFERENT``, else 1 if any sidecar
+is wrong, else 0.
 """
 
 from __future__ import annotations
@@ -62,7 +83,9 @@ from typing import Any
 CMR = "https://cmr.earthdata.nasa.gov/search/granules.umm_json"
 FIELDS = ["verdict", "provider", "short_name", "granule_ur", "file_format", "data_newer_by_days", "variables_compared", "chunks_compared",
           "chunks_mismatched", "variables_mismatched", "only_in_sidecar", "only_in_file", "file_size", "sidecar_max_byte",
-          "first_mismatch", "data_url"]
+          "first_mismatch", "metadata_differences", "filter_order_differs", "hyrax_values", "hyrax_detail", "data_url"]
+HYRAX = "https://opendap.earthdata.nasa.gov"
+FILTER_NAMES = {"zlib": "deflate", "gzip": "deflate", "deflate": "deflate", "shuffle": "shuffle", "fletcher32": "fletcher32", "zstd": "zstd", "blosc": "blosc", "lz4": "lz4"}
 
 
 def manifests(group: Any, prefix: str = "") -> dict[str, dict[str, dict[str, Any]]]:
@@ -73,7 +96,52 @@ def manifests(group: Any, prefix: str = "") -> dict[str, dict[str, dict[str, Any
     return out
 
 
-def compare(sidecar: dict[str, dict[str, dict[str, Any]]], file: dict[str, dict[str, dict[str, Any]]], file_size: int | None) -> dict[str, Any]:
+def filters(metadata: Any) -> list[str]:
+    """The array's filters in order, by common name; the bytes (endianness) codec is left out."""
+    names = []
+    for codec in metadata.codecs:
+        config = getattr(codec, "codec_config", None) or {}
+        name = str(config.get("id") or getattr(codec, "codec_name", "") or type(codec).__name__).rsplit(".", 1)[-1].lower()
+        if name in ("bytes", "bytescodec"):
+            continue
+        names.append(FILTER_NAMES.get(name, name))
+    return names
+
+
+def describe(group: Any, prefix: str = "") -> dict[str, dict[str, Any]]:
+    """{variable path: shape, data type, chunk shape and filters} for every array under a ManifestGroup."""
+    out = {}
+    for name, array in group.arrays.items():
+        m = array.metadata
+        out[f"{prefix}/{name}"] = {"shape": tuple(m.shape), "dtype": str(m.data_type), "chunks": tuple(m.chunk_grid.chunk_shape), "filters": filters(m)}
+    for name, child in group.groups.items():
+        out.update(describe(child, f"{prefix}/{name}"))
+    return out
+
+
+def compare_metadata(sidecar: dict[str, dict[str, Any]], file: dict[str, dict[str, Any]]) -> tuple[list[str], int]:
+    """(differences that change what the bytes mean, variables whose filters agree as a set but not in order).
+
+    Fill values and compression levels are left out: the two parsers report
+    them differently for the same file, and neither changes which bytes are read.
+    Filter order is counted but not failed for the same reason."""
+    differences, reordered = [], 0
+    for name in sorted(set(sidecar) & set(file)):
+        a, b = sidecar[name], file[name]
+        for key in ("shape", "dtype", "chunks"):
+            if a[key] != b[key]:
+                differences.append(f"{name} {key}: sidecar {a[key]}, file {b[key]}")
+        if sorted(a["filters"]) != sorted(b["filters"]):
+            differences.append(f"{name} filters: sidecar {a['filters']}, file {b['filters']}")
+        elif a["filters"] != b["filters"]:
+            reordered += 1
+    return differences, reordered
+
+
+def compare(
+    sidecar: dict[str, dict[str, dict[str, Any]]], file: dict[str, dict[str, dict[str, Any]]], file_size: int | None,
+    sidecar_meta: dict[str, dict[str, Any]] | None = None, file_meta: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """The verdict for one granule from its two chunk indexes."""
     shared = sorted(set(sidecar) & set(file))
     chunks = mismatched = 0
@@ -88,10 +156,13 @@ def compare(sidecar: dict[str, dict[str, dict[str, Any]]], file: dict[str, dict[
             k = differing[0]
             first = first or f"{name}[{k}]: sidecar {a[k]['offset']}+{a[k]['length']}, file {b[k]['offset']}+{b[k]['length']}"
     max_byte = max((c["offset"] + c["length"] for m in sidecar.values() for c in m.values()), default=0)
+    differences, reordered = compare_metadata(sidecar_meta or {}, file_meta or {})
     if file_size is not None and max_byte > file_size:
         verdict = "SIDECAR_PAST_END"
     elif mismatched:
         verdict = "MISMATCH"
+    elif differences:
+        verdict = "METADATA_MISMATCH"
     elif chunks == 0:
         verdict = "nothing_to_compare"
     else:
@@ -100,6 +171,8 @@ def compare(sidecar: dict[str, dict[str, dict[str, Any]]], file: dict[str, dict[
         "verdict": verdict, "variables_compared": len(shared), "chunks_compared": chunks, "chunks_mismatched": mismatched,
         "variables_mismatched": len(bad_variables), "only_in_sidecar": len(set(sidecar) - set(file)), "only_in_file": len(set(file) - set(sidecar)),
         "file_size": file_size, "sidecar_max_byte": max_byte, "first_mismatch": first,
+        "metadata_differences": "; ".join(differences[:5]) + (f"; and {len(differences) - 5} more" if len(differences) > 5 else ""),
+        "filter_order_differs": reordered, "mismatched_variables": bad_variables,
     }
 
 
@@ -150,6 +223,13 @@ class Access:
         self._stores: dict[str, Any] = {}
         self._credentials: dict[str, dict[str, str]] = {}
 
+    def token(self) -> str:
+        """An Earthdata bearer token, for Hyrax."""
+        token = getattr(self.auth, "token", None) or {}
+        if not token.get("access_token"):
+            raise RuntimeError("no Earthdata token available for Hyrax; set EARTHDATA_TOKEN")
+        return token["access_token"]
+
     def locate(self, row: dict[str, str]) -> tuple[str, Any]:
         """(the data file's URL on this transport, the store that serves it)."""
         from obstore.store import HTTPStore, S3Store
@@ -175,7 +255,10 @@ class Access:
         return url, (f"s3://{bucket}", self._stores[bucket])
 
 
-def verify(row: dict[str, str], access: Access, traceback_wanted: bool = False) -> dict[str, Any]:
+def verify(
+    row: dict[str, str], access: Access, traceback_wanted: bool = False, values: str = "none", value_variables: int = 3,
+    max_value_bytes: int = 64 * 2**20,
+) -> dict[str, Any]:
     import obstore
     from obspec_utils.registry import ObjectStoreRegistry
     from virtualizarr.parsers import DMRPPParser, HDFParser
@@ -191,6 +274,7 @@ def verify(row: dict[str, str], access: Access, traceback_wanted: bool = False) 
         key = url[len(root):].lstrip("/")
         size = int(obstore.head(store, key)["size"])
         magic = bytes(obstore.get_range(store, key, start=0, end=8))
+        file_meta: dict[str, dict[str, Any]] = {}
         if magic.startswith(b"CDF"):
             from virtualizarr.parsers import NetCDF3Parser
 
@@ -200,19 +284,148 @@ def verify(row: dict[str, str], access: Access, traceback_wanted: bool = False) 
         else:
             out["verdict"] = "not_hdf5"  # HDF4 or something else: no file-side parser here can index it
             return out
-        stage = "reading the sidecar"
-        from_sidecar = manifests(DMRPPParser()(url + ".dmrpp", registry)._group)
         stage = "reading the file's own index"
-        from_file = manifests(file_parser(url, registry)._group)
+        file_group = file_parser(url, registry)._group
+        file_meta = describe(file_group)
+        stage = "reading the sidecar"
+        sidecar_group = DMRPPParser()(url + ".dmrpp", registry)._group
         stage = "comparing"
-        out.update(compare(from_sidecar, from_file, size))
+        out.update(compare(manifests(sidecar_group), manifests(file_group), size, describe(sidecar_group), file_meta))
     except Exception as error:  # noqa: BLE001 -- one unreadable granule is a row, not the end of the run
-        out["verdict"] = f"error {stage}: {type(error).__name__}: {str(error)[:200]}"
+        out["verdict"] = f"error {stage}: {type(error).__name__}: {' '.join(str(error).split())[:200]}"
         if traceback_wanted:
             import traceback
 
             traceback.print_exc()
+    wanted = values == "all" or (values == "mismatch" and out["verdict"] != "match")
+    if wanted and "store" in locals() and out.get("file_format"):
+        try:
+            out["hyrax_values"], out["hyrax_detail"] = check_values(
+                row, access, store, key, size, out["file_format"], file_meta if "file_meta" in locals() else {},
+                out.get("mismatched_variables") or [], value_variables, max_value_bytes,
+            )
+        except Exception as error:  # noqa: BLE001 -- the value check failing is a result, not a crash
+            out["hyrax_values"] = f"skipped: {type(error).__name__}: {' '.join(str(error).split())[:200]}"
+            if traceback_wanted:
+                import traceback
+
+                traceback.print_exc()
     return out
+
+
+def granule_identity(row: dict[str, str]) -> tuple[str, str]:
+    """(collection concept id, GranuleUR) for Hyrax's URL, from the row or from CMR by file name."""
+    if row.get("concept_id") and row.get("granule_ur"):
+        return row["concept_id"], row["granule_ur"]
+    name = row["data_url"].rsplit("/", 1)[-1]
+    scope = {"collection_concept_id": row["concept_id"]} if row.get("concept_id") else {"provider": row["provider"]} if row.get("provider") else {}
+    items: list[dict[str, Any]] = []
+    for candidate in (name, name.rsplit(".", 1)[0]):  # CMR knows a granule by its file name or by the name without the extension
+        query = urllib.parse.urlencode({"readable_granule_name": candidate, "page_size": 5, **scope})
+        with urllib.request.urlopen(f"{CMR}?{query}", timeout=60) as response:
+            items = json.load(response).get("items", [])
+        if items:
+            break
+    if not items:
+        raise LookupError(f"CMR has no granule named {name}")
+    return items[0]["meta"]["collection-concept-id"], items[0]["umm"]["GranuleUR"]
+
+
+def direct_values(store: Any, key: str, size: int, file_format: str, names: list[str]) -> dict[str, Any]:
+    """The stored (unscaled) values of ``names`` read from the file itself."""
+    import io
+
+    import numpy as np
+
+    if file_format == "HDF5":
+        import h5py
+        from obspec_utils.readers import BlockStoreReader
+
+        with BlockStoreReader(store, key, block_size=4 * 2**20) as reader, h5py.File(reader, "r") as f:
+            return {name: np.asarray(f[name][...]) for name in names}
+    import obstore
+    from scipy.io import netcdf_file
+
+    if size > 256 * 2**20:
+        raise ValueError("netCDF classic file over 256 MiB: not read whole")
+    with netcdf_file(io.BytesIO(bytes(obstore.get(store, key).bytes())), "r", mmap=False, maskandscale=False) as f:
+        return {name: np.array(f.variables[name.lstrip("/")][...]) for name in names}
+
+
+def hyrax_values(token: str, concept_id: str, granule_ur: str, name: str) -> Any:
+    """One variable's stored values as Hyrax serves them (a netCDF-4 response). Raises RuntimeError with Hyrax's message."""
+    import re
+    import tempfile
+    import urllib.error
+
+    import h5py
+    import numpy as np
+
+    url = f"{HYRAX}/collections/{concept_id}/granules/{urllib.parse.quote(granule_ur)}.dap.nc4?dap4.ce={urllib.parse.quote(name)}"
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "User-Agent": "verify-dmrpp/0.1"})
+    try:
+        with urllib.request.urlopen(request, timeout=600) as response:
+            body = response.read()
+    except urllib.error.HTTPError as error:
+        text = re.sub(r"<[^>]+>|\s+", " ", error.read().decode(errors="replace"))
+        message = re.search(r"associated with your request was:\s*(.*?)\s*If you think", text)
+        raise RuntimeError(f"{error.code} {message.group(1) if message else ' '.join(text.split())[-200:]}") from None
+    if not body.startswith(b"\x89HDF"):
+        raise RuntimeError(f"not a netCDF-4 response: {body[:80]!r}")
+    with tempfile.NamedTemporaryFile(suffix=".nc4") as scratch:
+        scratch.write(body)
+        scratch.flush()
+        with h5py.File(scratch.name, "r") as f:
+            return np.asarray(f[name][...])
+
+
+def same_values(a: Any, b: Any) -> bool:
+    import numpy as np
+
+    if a.shape != b.shape:
+        return False
+    if a.dtype.kind in "fc" or b.dtype.kind in "fc":
+        return bool(np.array_equal(a, b, equal_nan=True))
+    return bool(np.array_equal(a, b))
+
+
+def choose_variables(file_meta: dict[str, dict[str, Any]], mismatched: list[str], limit: int, max_bytes: int) -> list[str]:
+    """Numeric arrays small enough to fetch: the mismatched ones first, then the largest."""
+    import math
+    import re
+
+    def nbytes(meta: dict[str, Any]) -> int:
+        bits = re.search(r"(\d+)", meta["dtype"])
+        return math.prod(meta["shape"]) * (int(bits.group(1)) // 8 if bits else 8)
+
+    numeric = {n: nbytes(m) for n, m in file_meta.items() if re.match(r"(U?Int|Float)\d+", m["dtype"]) and m["shape"] and 0 < nbytes(m) <= max_bytes}
+    ordered = [n for n in mismatched if n in numeric] + sorted((n for n in numeric if n not in mismatched), key=lambda n: -numeric[n])
+    return ordered[:limit]
+
+
+def check_values(
+    row: dict[str, str], access: Access, store: Any, key: str, size: int, file_format: str, file_meta: dict[str, dict[str, Any]],
+    mismatched: list[str], limit: int, max_bytes: int,
+) -> tuple[str, str]:
+    """(hyrax_values, detail): compare what Hyrax serves with a direct read, variable by variable."""
+    names = choose_variables(file_meta, mismatched, limit, max_bytes)
+    if not names:
+        return "skipped: no numeric variable under the size limit", ""
+    concept_id, granule_ur = granule_identity(row)
+    truth = direct_values(store, key, size, file_format, names)
+    results = {}
+    for name in names:
+        try:
+            results[name] = "identical" if same_values(hyrax_values(access.token(), concept_id, granule_ur, name), truth[name]) else "DIFFERENT"
+        except RuntimeError as error:
+            results[name] = f"hyrax error: {error}"
+    detail = "; ".join(f"{name}: {result}" for name, result in results.items())
+    if any(r == "DIFFERENT" for r in results.values()):
+        return "DIFFERENT", detail
+    errors = [r for r in results.values() if r.startswith("hyrax error")]
+    if errors:
+        return errors[0][:160], detail
+    return "identical", detail
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -223,6 +436,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--min-gap-days", type=float, default=0.0, help="only granules whose data file is at least this much newer than its sidecar")
     p.add_argument("--collection", nargs="*", help="only these collections (short names or concept ids) from the CSV")
     p.add_argument("--limit", type=int, help="stop after this many granules")
+    p.add_argument("--values", nargs="?", const="mismatch", default="none", choices=("none", "mismatch", "all"),
+                   help="also compare what Hyrax serves with a direct read: for granules that did not match (default when given), or for all")
+    p.add_argument("--value-variables", type=int, default=3, help="variables to compare per granule")
+    p.add_argument("--max-value-mb", type=int, default=64, help="skip variables larger than this, uncompressed")
     p.add_argument("--traceback", action="store_true", help="print the full traceback when a granule errors")
     p.add_argument("--out", help="write verdicts to this CSV as well as the screen")
     args = p.parse_args(argv)
@@ -236,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
                 found = [r for r in found if r.get("short_name") in args.collection or r.get("concept_id") in args.collection]
             rows += pick(found, args.per_collection, args.min_gap_days, None)
         else:
-            rows.append({"data_url": item, "provider": os.environ.get("CMR_PROVIDER", "")})
+            rows.append({"data_url": item.strip(), "provider": os.environ.get("CMR_PROVIDER", "")})
     rows = rows[: args.limit] if args.limit else rows
     print(f"{len(rows)} granules to verify over {args.transport}", file=sys.stderr)
     access = Access(args.transport)
@@ -245,20 +462,29 @@ def main(argv: list[str] | None = None) -> int:
     if writer:
         writer.writeheader()
     tally: dict[str, int] = defaultdict(int)
+    hyrax: dict[str, int] = defaultdict(int)
     for index, row in enumerate(rows, 1):
-        result = verify(row, access, args.traceback)
+        result = verify(row, access, args.traceback, args.values, args.value_variables, args.max_value_mb * 2**20)
         tally["error" if result["verdict"].startswith("error") else result["verdict"]] += 1
         detail = f"{result.get('chunks_mismatched')} of {result.get('chunks_compared')} chunks differ" if "chunks_compared" in result else ""
         print(f"[{index}/{len(rows)}] {result['verdict']:<18} {result.get('short_name') or ''} {row['data_url'].rsplit('/', 1)[-1]} {detail}", flush=True)
-        if result.get("first_mismatch"):
-            print(f"      {result['first_mismatch']}", flush=True)
+        for note in (result.get("first_mismatch"), result.get("metadata_differences")):
+            if note:
+                print(f"      {note}", flush=True)
+        if result.get("hyrax_values"):
+            hyrax[result["hyrax_values"].split(":")[0]] += 1
+            print(f"      Hyrax values: {result['hyrax_values']}" + (f" ({result['hyrax_detail']})" if result.get("hyrax_detail") else ""), flush=True)
         if writer and sink:
             writer.writerow(result)
             sink.flush()
     if sink:
         sink.close()
     print("\n" + ", ".join(f"{k}: {v}" for k, v in sorted(tally.items())))
-    return 1 if tally.get("MISMATCH") or tally.get("SIDECAR_PAST_END") else 0
+    if hyrax:
+        print("Hyrax values: " + ", ".join(f"{k}: {v}" for k, v in sorted(hyrax.items())))
+    if hyrax.get("DIFFERENT"):
+        return 2
+    return 1 if tally.get("MISMATCH") or tally.get("SIDECAR_PAST_END") or tally.get("METADATA_MISMATCH") else 0
 
 
 if __name__ == "__main__":

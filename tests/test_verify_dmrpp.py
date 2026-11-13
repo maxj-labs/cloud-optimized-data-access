@@ -60,3 +60,43 @@ def test_the_listing_scripts_rows_are_accepted():
     assert verify.pick([row], per_collection=1, min_gap_days=1, limit=None) == [row]
     kept = verify.normalise({"provider": "P", "data_url": "https://h/f.nc", "concept_id": "C2-Q"})
     assert kept["data_url"] == "https://h/f.nc" and kept["provider"] == "P"
+
+
+def meta(shape=(1, 4, 4), dtype="Float32(endianness='little')", chunks=(1, 2, 2), filters=("shuffle", "deflate")):
+    return {"shape": shape, "dtype": dtype, "chunks": chunks, "filters": list(filters)}
+
+
+def test_metadata_that_changes_what_the_bytes_mean_is_a_mismatch_but_filter_order_is_only_counted():
+    same, reordered = verify.compare_metadata({"/a": meta(filters=("deflate", "shuffle"))}, {"/a": meta()})
+    assert same == [] and reordered == 1
+    differences, _ = verify.compare_metadata(
+        {"/a": meta(dtype="Float64(endianness='little')"), "/b": meta()}, {"/a": meta(dtype="Float64(endianness='big')", filters=()), "/b": meta()}
+    )
+    assert len(differences) == 2 and "/a dtype" in differences[0] and "/a filters" in differences[1]
+    index = {"/a": {"0": chunk(0, 10)}}
+    out = verify.compare(index, index, 100, {"/a": meta(shape=(1, 8, 4))}, {"/a": meta()})
+    assert out["verdict"] == "METADATA_MISMATCH" and "/a shape" in out["metadata_differences"]
+    assert verify.compare(index, index, 100, {"/a": meta(filters=("deflate", "shuffle"))}, {"/a": meta()})["verdict"] == "match"
+
+
+def test_filters_are_named_in_order_without_the_bytes_codec():
+    codecs = [SimpleNamespace(codec_name="bytes"), SimpleNamespace(codec_config={"id": "shuffle"}), SimpleNamespace(codec_config={"id": "zlib", "level": 5})]
+    assert verify.filters(SimpleNamespace(codecs=codecs)) == ["shuffle", "deflate"]
+
+
+def test_value_check_picks_mismatched_variables_first_and_skips_large_or_non_numeric_ones():
+    file_meta = {
+        "/big": meta(shape=(1000, 1000, 100)), "/sst": meta(shape=(1, 100, 100)), "/lat": meta(shape=(100,), dtype="Float64(endianness='big')"),
+        "/name": meta(shape=(10,), dtype="FixedLengthUTF32(length=4)"), "/scalar": meta(shape=()),
+    }
+    assert verify.choose_variables(file_meta, ["/lat"], limit=2, max_bytes=64 * 2**20) == ["/lat", "/sst"]
+    assert verify.choose_variables(file_meta, [], limit=5, max_bytes=64 * 2**20) == ["/sst", "/lat"]
+
+
+def test_same_values_treats_nan_as_equal_and_shape_as_part_of_the_answer():
+    import numpy as np
+
+    a = np.array([1.0, np.nan])
+    assert verify.same_values(a, a.copy()) and not verify.same_values(a, np.array([1.0, 2.0]))
+    assert not verify.same_values(np.zeros((2, 1)), np.zeros(2))
+    assert verify.same_values(np.array([1, 2], dtype="int16"), np.array([1, 2], dtype="int32"))
