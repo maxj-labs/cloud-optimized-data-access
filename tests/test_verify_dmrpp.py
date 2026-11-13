@@ -91,6 +91,14 @@ def test_value_check_picks_mismatched_variables_first_and_skips_large_or_non_num
     }
     assert verify.choose_variables(file_meta, ["/lat"], limit=2, max_bytes=64 * 2**20) == ["/lat", "/sst"]
     assert verify.choose_variables(file_meta, [], limit=5, max_bytes=64 * 2**20) == ["/sst", "/lat"]
+    assert verify.choose_variables(file_meta, ["/lat"], limit=2) == ["/lat", "/big"]  # no size limit: a block is read, not the whole
+
+
+def test_the_value_check_reads_a_block_from_the_middle_of_each_variable():
+    block = verify.slab((1, 9000, 18000), edge=256)
+    assert block == (slice(0, 1), slice(4372, 4628), slice(8872, 9128))
+    assert verify.slab((10,), edge=256) == (slice(0, 10),)
+    assert verify.constraint("/sea_ice_fraction", block) == "/sea_ice_fraction[0:1:0][4372:1:4627][8872:1:9127]"
 
 
 def test_same_values_treats_nan_as_equal_and_shape_as_part_of_the_answer():

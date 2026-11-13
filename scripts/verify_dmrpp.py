@@ -49,9 +49,12 @@ Variables only one side lists are counted, not failed: a sidecar may inline
 small variables and omit chunks that are all fill value.
 
 ``--values`` then asks the question a user cares about: does the service
-return the right numbers? For each chosen granule it requests up to
-``--value-variables`` variables from Hyrax (OPeNDAP) and compares them with
-a direct read of the file. The ``hyrax_values`` column is one of:
+return the right numbers? For each chosen granule it requests a block from
+the middle of up to ``--value-variables`` variables from Hyrax (OPeNDAP) and
+compares it with a direct read of the same block from the file. A block is
+at most ``--value-edge`` elements per dimension (256 by default), so the
+check costs the same for a small variable and a global grid. Variables the
+sidecar describes differently from the file are checked first. The ``hyrax_values`` column is one of:
 
 - ``identical``: every variable checked equals the direct read.
 - ``DIFFERENT``: Hyrax answered with other numbers and no error. This is
@@ -85,6 +88,7 @@ FIELDS = ["verdict", "provider", "short_name", "granule_ur", "file_format", "dat
           "chunks_mismatched", "variables_mismatched", "only_in_sidecar", "only_in_file", "file_size", "sidecar_max_byte",
           "first_mismatch", "metadata_differences", "filter_order_differs", "hyrax_values", "hyrax_detail", "data_url"]
 HYRAX = "https://opendap.earthdata.nasa.gov"
+HYRAX_TIMEOUT_S = 120  # per request; a slow or failing Hyrax answer is recorded, not waited on
 FILTER_NAMES = {"zlib": "deflate", "gzip": "deflate", "deflate": "deflate", "shuffle": "shuffle", "fletcher32": "fletcher32", "zstd": "zstd", "blosc": "blosc", "lz4": "lz4"}
 
 
@@ -273,7 +277,7 @@ class Access:
 
 def verify(
     row: dict[str, str], access: Access, traceback_wanted: bool = False, values: str = "none", value_variables: int = 3,
-    max_value_bytes: int = 64 * 2**20,
+    value_edge: int = 256,
 ) -> dict[str, Any]:
     import obstore
     from obspec_utils.registry import ObjectStoreRegistry
@@ -324,7 +328,7 @@ def verify(
         try:
             out["hyrax_values"], out["hyrax_detail"] = check_values(
                 row, access, store, key, size, out["file_format"], file_meta if "file_meta" in locals() else {},
-                out.get("mismatched_variables") or [], value_variables, max_value_bytes,
+                out.get("mismatched_variables") or [], value_variables, value_edge,
             )
         except Exception as error:  # noqa: BLE001 -- the value check failing is a result, not a crash
             out["hyrax_values"] = f"skipped: {type(error).__name__}: {' '.join(str(error).split())[:200]}"
@@ -353,8 +357,21 @@ def granule_identity(row: dict[str, str]) -> tuple[str, str]:
     return items[0]["meta"]["collection-concept-id"], items[0]["umm"]["GranuleUR"]
 
 
-def direct_values(store: Any, key: str, size: int, file_format: str, names: list[str]) -> dict[str, Any]:
-    """The stored (unscaled) values of ``names`` read from the file itself."""
+def slab(shape: tuple[int, ...], edge: int) -> tuple[slice, ...]:
+    """A block of at most ``edge`` elements per dimension from the middle of an array.
+
+    The value check reads this block, not the whole variable: it is one small
+    request to Hyrax and a few chunks from the file, however large the variable is."""
+    return tuple(slice((n - min(n, edge)) // 2, (n - min(n, edge)) // 2 + min(n, edge)) for n in shape)
+
+
+def constraint(name: str, block: tuple[slice, ...]) -> str:
+    """The DAP4 constraint expression for ``block`` of ``name``: /v[10:1:19][0:1:4]."""
+    return name + "".join(f"[{s.start}:1:{s.stop - 1}]" for s in block)
+
+
+def direct_values(store: Any, key: str, size: int, file_format: str, blocks: dict[str, tuple[slice, ...]]) -> dict[str, Any]:
+    """The stored (unscaled) values of each variable's block, read from the file itself."""
     import io
 
     import numpy as np
@@ -364,18 +381,19 @@ def direct_values(store: Any, key: str, size: int, file_format: str, names: list
         from obspec_utils.readers import BlockStoreReader
 
         with BlockStoreReader(store, key, block_size=4 * 2**20) as reader, h5py.File(reader, "r") as f:
-            return {name: np.asarray(f[name][...]) for name in names}
+            return {name: np.asarray(f[name][block]) for name, block in blocks.items()}
     import obstore
     from scipy.io import netcdf_file
 
     if size > 256 * 2**20:
         raise ValueError("netCDF classic file over 256 MiB: not read whole")
     with netcdf_file(io.BytesIO(bytes(obstore.get(store, key).bytes())), "r", mmap=False, maskandscale=False) as f:
-        return {name: np.array(f.variables[name.lstrip("/")][...]) for name in names}
+        return {name: np.array(f.variables[name.lstrip("/")][block]) for name, block in blocks.items()}
 
 
-def hyrax_values(token: str, concept_id: str, granule_ur: str, name: str) -> Any:
-    """One variable's stored values as Hyrax serves them (a netCDF-4 response). Raises RuntimeError with Hyrax's message."""
+def hyrax_values(token: str, concept_id: str, granule_ur: str, name: str, block: tuple[slice, ...] | None = None) -> Any:
+    """One variable's stored values (or one block of them) as Hyrax serves them, in a
+    netCDF-4 response. Raises RuntimeError with Hyrax's message."""
     import re
     import tempfile
     import urllib.error
@@ -383,15 +401,19 @@ def hyrax_values(token: str, concept_id: str, granule_ur: str, name: str) -> Any
     import h5py
     import numpy as np
 
-    url = f"{HYRAX}/collections/{concept_id}/granules/{urllib.parse.quote(granule_ur)}.dap.nc4?dap4.ce={urllib.parse.quote(name)}"
+    url = f"{HYRAX}/collections/{concept_id}/granules/{urllib.parse.quote(granule_ur)}.dap.nc4?dap4.ce={urllib.parse.quote(constraint(name, block) if block else name)}"
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "User-Agent": "verify-dmrpp/0.1"})
     try:
-        with urllib.request.urlopen(request, timeout=600) as response:
+        with urllib.request.urlopen(request, timeout=HYRAX_TIMEOUT_S) as response:
             body = response.read()
     except urllib.error.HTTPError as error:
         text = re.sub(r"<[^>]+>|\s+", " ", error.read().decode(errors="replace"))
         message = re.search(r"associated with your request was:\s*(.*?)\s*If you think", text)
+        if error.code == 504:
+            raise RuntimeError("504 gateway timeout") from None
         raise RuntimeError(f"{error.code} {message.group(1) if message else ' '.join(text.split())[-200:]}") from None
+    except (TimeoutError, urllib.error.URLError) as error:
+        raise RuntimeError(f"no answer within {HYRAX_TIMEOUT_S} s ({type(error).__name__})") from None
     if not body.startswith(b"\x89HDF"):
         raise RuntimeError(f"not a netCDF-4 response: {body[:80]!r}")
     with tempfile.NamedTemporaryFile(suffix=".nc4") as scratch:
@@ -411,8 +433,9 @@ def same_values(a: Any, b: Any) -> bool:
     return bool(np.array_equal(a, b))
 
 
-def choose_variables(file_meta: dict[str, dict[str, Any]], mismatched: list[str], limit: int, max_bytes: int) -> list[str]:
-    """Numeric arrays small enough to fetch: the mismatched ones first, then the largest."""
+def choose_variables(file_meta: dict[str, dict[str, Any]], mismatched: list[str], limit: int, max_bytes: int | None = None) -> list[str]:
+    """Numeric arrays: the mismatched ones first, then the largest. ``max_bytes``
+    leaves out larger variables; None keeps them all (the check reads a block, not the whole)."""
     import math
     import re
 
@@ -420,25 +443,27 @@ def choose_variables(file_meta: dict[str, dict[str, Any]], mismatched: list[str]
         bits = re.search(r"(\d+)", meta["dtype"])
         return math.prod(meta["shape"]) * (int(bits.group(1)) // 8 if bits else 8)
 
-    numeric = {n: nbytes(m) for n, m in file_meta.items() if re.match(r"(U?Int|Float)\d+", m["dtype"]) and m["shape"] and 0 < nbytes(m) <= max_bytes}
+    numeric = {n: nbytes(m) for n, m in file_meta.items() if re.match(r"(U?Int|Float)\d+", m["dtype"]) and m["shape"] and 0 < nbytes(m) and (max_bytes is None or nbytes(m) <= max_bytes)}
     ordered = [n for n in mismatched if n in numeric] + sorted((n for n in numeric if n not in mismatched), key=lambda n: -numeric[n])
     return ordered[:limit]
 
 
 def check_values(
     row: dict[str, str], access: Access, store: Any, key: str, size: int, file_format: str, file_meta: dict[str, dict[str, Any]],
-    mismatched: list[str], limit: int, max_bytes: int,
+    mismatched: list[str], limit: int, edge: int,
 ) -> tuple[str, str]:
-    """(hyrax_values, detail): compare what Hyrax serves with a direct read, variable by variable."""
-    names = choose_variables(file_meta, mismatched, limit, max_bytes)
+    """(hyrax_values, detail): compare what Hyrax serves with a direct read, one block per variable."""
+    names = choose_variables(file_meta, mismatched, limit)
     if not names:
-        return "skipped: no numeric variable under the size limit", ""
+        return "skipped: no numeric variable to compare", ""
     concept_id, granule_ur = granule_identity(row)
-    truth = direct_values(store, key, size, file_format, names)
+    blocks = {name: slab(file_meta[name]["shape"], edge) for name in names}
+    truth = direct_values(store, key, size, file_format, blocks)
     results = {}
     for name in names:
         try:
-            results[name] = "identical" if same_values(hyrax_values(access.token(), concept_id, granule_ur, name), truth[name]) else "DIFFERENT"
+            served = hyrax_values(access.token(), concept_id, granule_ur, name, blocks[name])
+            results[name] = "identical" if same_values(served.reshape(truth[name].shape) if served.size == truth[name].size else served, truth[name]) else "DIFFERENT"
         except RuntimeError as error:
             results[name] = f"hyrax error: {error}"
     detail = "; ".join(f"{name}: {result}" for name, result in results.items())
@@ -461,7 +486,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--values", nargs="?", const="mismatch", default="none", choices=("none", "mismatch", "all"),
                    help="also compare what Hyrax serves with a direct read: for granules that did not match (default when given), or for all")
     p.add_argument("--value-variables", type=int, default=3, help="variables to compare per granule")
-    p.add_argument("--max-value-mb", type=int, default=64, help="skip variables larger than this, uncompressed")
+    p.add_argument("--value-edge", type=int, default=256, help="compare a block of at most this many elements per dimension, from the middle of each variable")
+    p.add_argument("--start", type=int, default=1, help="begin at this granule number (as printed), to continue an interrupted run")
     p.add_argument("--traceback", action="store_true", help="print the full traceback when a granule errors")
     p.add_argument("--out", help="write verdicts to this CSV as well as the screen")
     args = p.parse_args(argv)
@@ -486,7 +512,9 @@ def main(argv: list[str] | None = None) -> int:
     tally: dict[str, int] = defaultdict(int)
     hyrax: dict[str, int] = defaultdict(int)
     for index, row in enumerate(rows, 1):
-        result = verify(row, access, args.traceback, args.values, args.value_variables, args.max_value_mb * 2**20)
+        if index < args.start:
+            continue
+        result = verify(row, access, args.traceback, args.values, args.value_variables, args.value_edge)
         tally["error" if result["verdict"].startswith("error") else result["verdict"]] += 1
         detail = f"{result.get('chunks_mismatched')} of {result.get('chunks_compared')} chunks differ" if "chunks_compared" in result else ""
         print(f"[{index}/{len(rows)}] {result['verdict']:<18} {result.get('short_name') or ''} {row['data_url'].rsplit('/', 1)[-1]} {detail}", flush=True)
