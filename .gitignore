@@ -240,3 +240,6 @@ Thumbs.db
 
 # locally built virtual stores (rebuild with `run.py build-store`)
 benchmarks/trade_study/stores/
+
+# the staleness inventory's working file; granules.jsonl.gz is the committed copy
+results/dmrpp_staleness/granules.jsonl
