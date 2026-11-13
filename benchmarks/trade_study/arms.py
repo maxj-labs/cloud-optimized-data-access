@@ -179,7 +179,7 @@ class UserStack(Arm):
         if hasattr(fs, "s3"):
             self._counter = S3fsCounter()
             self._counter.attach(fs)
-        urls = [self.granules[o]["source_url"] for o in observations]
+        urls = [ds.url(self.granules[o]) for o in observations]
         kwargs: dict[str, Any] = {"engine": "h5netcdf", "combine": "nested", "concat_dim": ds.dims[0]}
         self.settings = {"engine": "h5netcdf", "group": ds.group, "defaults": True, "files_opened": len(urls)}
         data = xr.open_mfdataset([fs.open(u) for u in urls], group=ds.group, **kwargs)
@@ -328,14 +328,15 @@ class VirtualIcechunk(Arm):
 
     name = "virtual_icechunk"
     chunk_id_reason = "inside the read: Icechunk fetches the chunk manifest on the first chunk request"
+    source = "hdf5"  # what the references were built from
 
     def open(self, observations: list[int]) -> None:
         import zarr
 
         if "zarr_concurrency" in self.given:
             zarr.config.set({"async.concurrency": int(self.given["zarr_concurrency"])})
-        self._data, self._time_index = self.dataset.open_virtual(self.payload, self.given)
-        self.settings = {"client": "icechunk", "chunks": None, "zarr_concurrency": zarr.config.get("async.concurrency"),
+        self._data, self._time_index = self.dataset.open_virtual(self.payload, self.given, self.source)
+        self.settings = {"client": "icechunk", "references_from": self.source, "chunks": None, "zarr_concurrency": zarr.config.get("async.concurrency"),
                          **{k: v for k, v in self.given.items() if k.startswith("icechunk_")}}
 
     def read(self, observations: list[int], sel: Selection) -> Result:
@@ -363,4 +364,15 @@ class VirtualIcechunk(Arm):
         return {"request_count": METADATA_OBJECTS + coord_chunks + data_chunks, "bytes_requested": nbytes, "kind": "static-minimum"}
 
 
-ARM_CLASSES: dict[str, type[Arm]] = {a.name: a for a in (UserStack, TunedH5py, Download, VirtualIcechunk)}
+class VirtualDmrpp(VirtualIcechunk):
+    """The same reader over references built from OPeNDAP's DMR++ sidecars
+    instead of from the HDF5 files. First cut: OPeNDAP has not reviewed it."""
+
+    name = "virtual_dmrpp"
+    source = "dmrpp"
+
+    def authenticate(self) -> None:
+        """Credentials are fetched when the store opens: Icechunk needs them to authorize the chunk container."""
+
+
+ARM_CLASSES: dict[str, type[Arm]] = {a.name: a for a in (UserStack, TunedH5py, Download, VirtualIcechunk, VirtualDmrpp)}

@@ -91,6 +91,12 @@ class Dataset:
     discovery_kind: ClassVar[str] = "cmr"
     index_location: ClassVar[str]  # where the virtual store's index is read from
     probe_range_mib: ClassVar[int] = 16  # bandwidth probe read size; five must fit in one granule
+    transports: ClassVar[tuple[str, ...]] = ("s3",)
+    transport: str = "s3"  # s3: direct, in the data's region; https: the DAAC's distribution endpoint, from anywhere
+
+    def url(self, granule: dict[str, Any]) -> str:
+        """The granule's address on this transport."""
+        return granule["source_url"]
     windows: ClassVar[dict[str, tuple[str, str]]]
 
     # --- pinned inputs -----------------------------------------------------------
@@ -141,8 +147,9 @@ class Dataset:
         """The fsspec filesystem a user would be handed."""
         raise NotImplementedError
 
-    def open_virtual(self, payload: dict[str, Any], settings: dict[str, Any]) -> tuple[Any, np.ndarray]:
-        """(xarray dataset over the virtual store, store time index per pinned granule)."""
+    def open_virtual(self, payload: dict[str, Any], settings: dict[str, Any], source: str = "hdf5") -> tuple[Any, np.ndarray]:
+        """(xarray dataset over the virtual store, store time index per pinned granule).
+        ``source`` names what the references were built from: "hdf5" or "dmrpp"."""
         raise NotImplementedError
 
     def h5_spec(self) -> dict[str, Any]:
@@ -308,10 +315,12 @@ class Goes19(Dataset):
         combined.vz.to_icechunk(session.store)
         return session.commit(f"{len(parts)} granules, window {payload['window']}")
 
-    def open_virtual(self, payload: dict[str, Any], settings: dict[str, Any]) -> tuple[Any, np.ndarray]:
+    def open_virtual(self, payload: dict[str, Any], settings: dict[str, Any], source: str = "hdf5") -> tuple[Any, np.ndarray]:
         import icechunk
         import xarray as xr
 
+        if source != "hdf5":
+            raise FileNotFoundError(f"{self.name} has no {source} index")
         path = self.store_path(payload["window"])
         if not path.exists():
             raise FileNotFoundError(f"{path} missing: run `run.py build-store --dataset {self.name} --window {payload['window']}`")
@@ -328,8 +337,11 @@ class Goes19(Dataset):
 
 
 class TempoNo2(Dataset):
-    """TEMPO NO₂ L3 V04 at ASDC. Needs an Earthdata login on a host in
-    us-west-2; the virtual store is the public Source Cooperative mirror."""
+    """TEMPO NO₂ L3 V04 at ASDC. Needs an Earthdata login. ``transport="s3"``
+    reads the bucket directly and needs a host in us-west-2; ``"https"`` reads
+    the same objects through ASDC's distribution endpoint with a bearer token,
+    from anywhere. The virtual store is the public Source Cooperative mirror;
+    ``build_dmrpp_store`` builds a second one from OPeNDAP's DMR++ sidecars."""
 
     name = "tempo_no2"
     region = "us-west-2"
@@ -340,6 +352,13 @@ class TempoNo2(Dataset):
     dims = ("time", "latitude", "longitude")
     index_location = "s3 (public mirror, us-west-2)"
     windows = tempo_cases.WINDOWS
+    transports = ("s3", "https")
+
+    def __init__(self, transport: str = "s3") -> None:
+        self.transport = transport
+
+    def url(self, granule: dict[str, Any]) -> str:
+        return tempo_backends.https_url(granule["source_url"]) if self.transport == "https" else granule["source_url"]
 
     def discover(self, window: str) -> list[dict[str, Any]]:
         return tempo_cases.discover(window).to_dict(orient="records")
@@ -364,21 +383,104 @@ class TempoNo2(Dataset):
         return slice(0, int(grid["latitude"]["size"])), slice(0, int(grid["longitude"]["size"]))
 
     def auth(self) -> dict[str, Any] | None:
+        """S3: temporary bucket credentials. HTTPS: the bearer-token headers."""
+        if self.transport == "https":
+            return {"client_options": tempo_backends._https_client_options()}
         return tempo_backends._fetch_asdc_credentials()
 
     def store_spec(self, credentials: dict[str, Any] | None) -> dict[str, Any]:
+        if self.transport == "https":
+            return tempo_backends.source_store_spec(None, "https", (credentials or {}).get("client_options"))
         return tempo_backends.source_store_spec(credentials)
 
     def filesystem(self, credentials: dict[str, Any] | None) -> Any:
-        return tempo_backends._earthaccess_filesystem()
+        return tempo_backends._earthaccess_filesystem(self.transport)
 
     def open_repo(self, settings: dict[str, Any]) -> Any:
-        return tempo_backends.open_mirror_repo("s3", {k: v for k, v in settings.items() if k.startswith("icechunk_")})
+        return tempo_backends.open_mirror_repo(self.transport, {k: v for k, v in settings.items() if k.startswith("icechunk_")})
 
-    def open_virtual(self, payload: dict[str, Any], settings: dict[str, Any]) -> tuple[Any, np.ndarray]:
+    # --- a second virtual store, from OPeNDAP's DMR++ sidecars -------------------
+
+    def dmrpp_store_path(self, window: str) -> Path:
+        return STORE_DIR / f"{self.name}-{window}-dmrpp-{self.transport}"
+
+    def _chunk_prefix(self) -> str:
+        if self.transport == "https":
+            return f"{tempo_backends.HTTPS_ENDPOINT}/{tempo_backends.SOURCE_BUCKET}/"
+        return f"{tempo_backends.SOURCE_PREFIX}/"
+
+    def _chunk_access(self, credentials: dict[str, Any] | None) -> tuple[Any, Any]:
+        """(virtual chunk container, its credentials) for this transport. The
+        bearer token is given at open time only; it is never written to the repository."""
+        import icechunk
+
+        prefix = self._chunk_prefix()
+        if self.transport == "https":
+            headers = dict(((credentials or {}).get("client_options") or {}).get("default_headers") or {})
+            container = icechunk.VirtualChunkContainer(prefix, icechunk.http_store(headers=headers or None))
+            return container, icechunk.containers_credentials({prefix: icechunk.credentials.HttpAccess})
+        c = credentials or {}
+        container = icechunk.VirtualChunkContainer(prefix, icechunk.s3_store(region=self.region))
+        access = icechunk.s3_credentials(access_key_id=c["accessKeyId"], secret_access_key=c["secretAccessKey"], session_token=c["sessionToken"])
+        return container, icechunk.containers_credentials({prefix: access})
+
+    def build_dmrpp_store(self, payload: dict[str, Any]) -> str:
+        """Virtual references from each granule's ``.dmrpp`` sidecar, written to a
+        local Icechunk repository; returns the snapshot id. Network: one sidecar
+        and the three coordinate arrays per granule."""
+        import shutil
+
+        import icechunk
+        import xarray as xr
+        from obspec_utils.registry import ObjectStoreRegistry
+        from virtualizarr import open_virtual_dataset
+        from virtualizarr.parsers import DMRPPParser
+
+        credentials = self.auth()
+        spec = self.store_spec(credentials)
+        root_url = tempo_backends.HTTPS_ENDPOINT if self.transport == "https" else tempo_backends.SOURCE_PREFIX
+        registry = ObjectStoreRegistry({root_url: tempo_backends.build_store(spec)})
+        parts = []
+        for granule in payload["granules"]:
+            sidecar = self.url(granule) + ".dmrpp"
+            root = open_virtual_dataset(sidecar, registry, DMRPPParser(), loadable_variables=list(self.dims))
+            product = open_virtual_dataset(sidecar, registry, DMRPPParser(group=self.group))[self.variable_names]
+            parts.append(product.assign_coords({d: root[d] for d in self.dims}))
+        combined = xr.concat(parts, dim=self.dims[0], coords="minimal", compat="override", combine_attrs="override")
+        path = self.dmrpp_store_path(payload["window"])
+        shutil.rmtree(path, ignore_errors=True)
+        config = icechunk.RepositoryConfig.default()
+        bare = icechunk.http_store() if self.transport == "https" else icechunk.s3_store(region=self.region)
+        config.set_virtual_chunk_container(icechunk.VirtualChunkContainer(self._chunk_prefix(), bare))
+        repo = icechunk.Repository.create(icechunk.local_filesystem_storage(str(path)), config=config)
+        session = repo.writable_session("main")
+        combined.vz.to_icechunk(session.store, validate_containers=False)
+        return session.commit(f"{len(parts)} granules from DMR++ sidecars, window {payload['window']}")
+
+    def _open_dmrpp(self, payload: dict[str, Any], settings: dict[str, Any]) -> tuple[Any, np.ndarray]:
+        import icechunk
+        import xarray as xr
+
+        path = self.dmrpp_store_path(payload["window"])
+        snapshot = (payload.get("dmrpp_snapshot_ids") or {}).get(self.transport)
+        if not path.exists() or not snapshot:
+            raise FileNotFoundError(
+                f"no DMR++ store for {self.transport}: run `run.py build-store --dataset {self.name} --window {payload['window']} --source dmrpp --transport {self.transport}`"
+            )
+        container, access = self._chunk_access(self.auth())
+        storage = icechunk.local_filesystem_storage(str(path))
+        config = tempo_backends.icechunk_config(icechunk.Repository.open(storage), settings)
+        config.set_virtual_chunk_container(container)
+        repo = icechunk.Repository.open(storage, config=config, authorize_virtual_chunk_access=access)
+        dataset = xr.open_zarr(repo.readonly_session(snapshot_id=snapshot).store, consolidated=False, zarr_format=3, chunks=None)
+        return dataset, np.arange(len(payload["granules"]))
+
+    def open_virtual(self, payload: dict[str, Any], settings: dict[str, Any], source: str = "hdf5") -> tuple[Any, np.ndarray]:
         import pandas as pd
         import xarray as xr
 
+        if source == "dmrpp":
+            return self._open_dmrpp(payload, settings)
         session = tempo_backends.pinned_session(self.open_repo(settings), payload["snapshot_id"])
         dataset = xr.open_zarr(session.store, consolidated=False, chunks=None)
         matcher = tempo_backends._VirtualSelection(dataset, pd.DataFrame(payload["granules"]))
@@ -386,7 +488,14 @@ class TempoNo2(Dataset):
         return dataset, matcher.time_indices
 
 
-DATASETS: dict[str, Dataset] = {d.name: d for d in (Goes19(), TempoNo2())}
+DATASETS: dict[str, type[Dataset]] = {d.name: d for d in (Goes19, TempoNo2)}
+
+
+def get_dataset(name: str, transport: str = "s3") -> Dataset:
+    cls = DATASETS[name]
+    if transport not in cls.transports:
+        raise SystemExit(f"{name} has no {transport!r} transport; choose from {list(cls.transports)}")
+    return cls(transport) if len(cls.transports) > 1 else cls()
 
 
 def timed_discovery(dataset: Dataset, window: str, reps: int = 3) -> tuple[list[dict[str, Any]], float]:

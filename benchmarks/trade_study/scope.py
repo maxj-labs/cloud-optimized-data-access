@@ -37,9 +37,10 @@ ARMS: tuple[ArmInfo, ...] = (
     ArmInfo("sliderule_h5p", 1, "C++ H5Coro via SlideRule", "h5p endpoint, server side in us-west-2", "proposed", "JP Swinski",
             "a SlideRule deployment that can read the benchmark granules"),
     ArmInfo("ros3", 1, "HDF5 2.2.0 ROS3 block cache", "libhdf5 reading S3 directly", "proposed", "Aleksandar Jelenak",
-            "an h5py built against HDF5 >= 2.2.0 with ROS3; the PyPI wheel in uv.lock (h5py 3.16.0, HDF5 2.0.0) registers no ros3 driver"),
-    ArmInfo("virtual_dmrpp", 1, "Virtual store from DMR++", "Same store, built from OPeNDAP's existing index", "proposed", "OPeNDAP",
-            "DMR++ sidecars for the pinned granules (Earthdata login) and VirtualiZarr's DMR++ parser"),
+            "an h5py built against HDF5 2.2.0 (released 2026-07-29), where the block cache arrived: conda-forge has one (h5py 3.16.0, linux-64, py312, hdf5 >=2.2.0); "
+            "the PyPI wheel in uv.lock bundles HDF5 2.0.0 and registers no ros3 driver"),
+    ArmInfo("virtual_dmrpp", 1, "Virtual store from DMR++", "Same store, built from OPeNDAP's existing index", "first-cut", "OPeNDAP",
+            "review by OPeNDAP; TEMPO only (GOES-19 has no sidecars); built with VirtualiZarr's DMR++ parser into a local Icechunk store"),
     ArmInfo("superchunks", 2, "Superchunks / buffer chunks", "Small chunks grouped into fewer, larger reads", "analysis", "To decide",
             "a client that issues the grouped reads; `run.py superchunks` gives the request and byte bounds meanwhile"),
     ArmInfo("s3_express", 2, "S3 Express One Zone", "Same arm, data in a single-zone bucket", "proposed", "To decide",
@@ -65,7 +66,7 @@ class DatasetInfo:
 
 DATASETS: tuple[DatasetInfo, ...] = (
     DatasetInfo("tempo_no2", "TEMPO NO₂ L3 V04 (grid, ASDC)", "Reference case; virtual store exists", "built",
-                "Earthdata login on a host in us-west-2; adapter tested offline on synthetic granules"),
+                "Earthdata login; run live over HTTPS only, not yet from a host in us-west-2"),
     DatasetInfo("goes19", "GOES-19 ABI L2 CMI band 13 (public, us-east-1)", "Rerunnable by anyone without credentials", "built"),
     DatasetInfo("atl03", "ICESat-2 ATL03 (photons, NSIDC)", "Swath-like; h5coro's home ground", "proposed",
                 "a point-cloud question shape; the harness assumes (time, y, x) grids"),

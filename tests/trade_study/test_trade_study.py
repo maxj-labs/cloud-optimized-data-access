@@ -96,8 +96,30 @@ def test_status_lists_every_arm_dataset_workload_and_metric():
 
 
 def test_a_proposed_arm_is_refused_with_what_it_needs(world):
-    with pytest.raises(SystemExit, match="proposed.*HDF5 >= 2.2.0"):
+    with pytest.raises(SystemExit, match="proposed.*HDF5 2.2.0"):
         run.make_arm("ros3", *world)
+
+
+def test_concurrent_rate_reads_a_bounded_prefix(world, tmp_path):
+    from benchmarks.tempo_no2.backends import build_store
+    from benchmarks.tempo_no2.counters import traced_store
+
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * 1000)
+    store, trace = traced_store(build_store({"kind": "local"}))
+    assert run.concurrent_rate(store, str(big), part_bytes=100, parts=3) > 0
+    ranges = trace.to_dataframe()
+    assert int(ranges["length"].sum()) == 300  # never the whole object
+
+
+def test_transport_is_checked_per_dataset():
+    from benchmarks.trade_study.datasets import get_dataset
+
+    assert get_dataset("tempo_no2", "https").transport == "https"
+    assert get_dataset("tempo_no2", "https").url({"source_url": "s3://asdc-prod-protected/a/b.nc"}) == "https://data.asdc.earthdata.nasa.gov/asdc-prod-protected/a/b.nc"
+    assert get_dataset("goes19").transport == "s3"
+    with pytest.raises(SystemExit, match="no 'https' transport"):
+        get_dataset("goes19", "https")
 
 
 # --- questions --------------------------------------------------------------------

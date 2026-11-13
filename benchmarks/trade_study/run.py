@@ -1,5 +1,9 @@
 """CLI: status | discover | build-store | probe | gate | trial | session | report | superchunks.
 
+Every network subcommand takes ``--transport``: ``s3`` (direct, from the data's
+region) or ``https`` (the DAAC's distribution endpoint with an Earthdata
+token, from anywhere). Results are filed per transport and never pooled.
+
 ``trial`` runs one trial in this process and prints one JSON row as the last
 line of stdout; ``session`` spawns one fresh process per trial, in shuffled
 order. The GOES-19 dataset needs no credentials, so every step can be rerun
@@ -29,6 +33,7 @@ from benchmarks.trade_study.datasets import (
     DATASETS,
     Case,
     Dataset,
+    get_dataset,
     headline_cases,
     parse_case,
     timed_discovery,
@@ -145,8 +150,13 @@ def gate_verdicts(rows: list[dict[str, Any]], reference: str) -> dict[str, str]:
     return verdicts
 
 
+def tag(dataset: Dataset) -> str:
+    """The dataset's name, with the transport when it is not direct S3: results never share a file across transports."""
+    return dataset.name if dataset.transport == "s3" else f"{dataset.name}-{dataset.transport}"
+
+
 def gate_path(dataset: Dataset, window: str) -> Path:
-    return RESULTS / "gates" / f"{dataset.name}-{window}.json"
+    return RESULTS / "gates" / f"{tag(dataset)}-{window}.json"
 
 
 # --- subcommands ------------------------------------------------------------------
@@ -158,7 +168,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
-    dataset = DATASETS[args.dataset]
+    dataset = get_dataset(args.dataset, args.transport)
     granules, seconds = timed_discovery(dataset, args.window)
     grid = dataset.describe_grid(granules)
     payload = {
@@ -176,37 +186,62 @@ def cmd_discover(args: argparse.Namespace) -> int:
 
 
 def cmd_build_store(args: argparse.Namespace) -> int:
-    dataset = DATASETS[args.dataset]
-    if not hasattr(dataset, "build_store"):
-        raise SystemExit(f"{dataset.name} reads an existing virtual store; nothing to build")
+    dataset = get_dataset(args.dataset, args.transport)
     payload = load_manifest(dataset, args.window)
     start = time.perf_counter()
-    payload["snapshot_id"] = dataset.build_store(payload)
-    payload["store_build_seconds"] = time.perf_counter() - start
+    if args.source == "dmrpp":
+        if not hasattr(dataset, "build_dmrpp_store"):
+            raise SystemExit(f"{dataset.name} has no DMR++ sidecars to build from")
+        snapshot = dataset.build_dmrpp_store(payload)
+        seconds = time.perf_counter() - start
+        payload.setdefault("dmrpp_snapshot_ids", {})[dataset.transport] = snapshot
+        payload.setdefault("dmrpp_store_build_seconds", {})[dataset.transport] = seconds
+        where = dataset.dmrpp_store_path(args.window)
+    else:
+        if not hasattr(dataset, "build_store"):
+            raise SystemExit(f"{dataset.name} reads an existing virtual store; nothing to build (try --source dmrpp)")
+        snapshot = payload["snapshot_id"] = dataset.build_store(payload)
+        seconds = payload["store_build_seconds"] = time.perf_counter() - start
+        where = dataset.store_path(args.window)
     dataset.manifest_path(args.window).write_text(json.dumps(payload, indent=2, default=str) + "\n")
-    print(f"built {dataset.store_path(args.window)} in {payload['store_build_seconds']:.0f} s; snapshot {payload['snapshot_id']} pinned in the manifest")
+    print(f"built {where} from {args.source} in {seconds:.0f} s; snapshot {snapshot} pinned in the manifest")
     return 0
+
+
+def concurrent_rate(store: Any, path: str, part_bytes: int = 4 * 2**20, parts: int = 16) -> float:
+    """MB/s over the first ``parts`` × ``part_bytes`` of an object (at most 64 MiB
+    by default, however large the granule), all ranges in flight at once. Network."""
+    import asyncio
+
+    async def fetch() -> int:
+        size = (await store.head_async(path))["size"]
+        starts = [s for s in range(0, min(size, parts * part_bytes), part_bytes)]
+        buffers = await asyncio.gather(*(store.get_range_async(path, start=s, end=min(s + part_bytes, size)) for s in starts))
+        return sum(len(memoryview(b)) for b in buffers)
+
+    start = time.perf_counter()
+    return asyncio.run(fetch()) / (time.perf_counter() - start) / 1e6
 
 
 def cmd_probe(args: argparse.Namespace) -> int:
     from benchmarks.tempo_no2.backends import build_store, store_path
-    from benchmarks.tempo_no2.counters import probe_download, probe_network
+    from benchmarks.tempo_no2.counters import probe_network
 
-    dataset = DATASETS[args.dataset]
+    dataset = get_dataset(args.dataset, args.transport)
     payload = load_manifest(dataset, args.window)
     spec = dataset.store_spec(dataset.auth())
     network = probe_network(build_store(spec), store_path(spec, payload["granules"][0]["source_url"]), range_reads=args.range_reads, range_bytes=(args.range_mib or dataset.probe_range_mib) * 2**20)
     # A floor needs the fastest rate the link has shown, and arms read with many streams:
     # also fetch the granule whole with 16 ranges in flight, and keep the best rate seen.
     path = store_path(spec, payload["granules"][0]["source_url"])
-    concurrent = max(probe_download(build_store(spec), path, part_bytes=2 * 2**20, concurrency=16)["mb_s"] for _ in range(3))
+    concurrent = max(concurrent_rate(build_store(spec), path) for _ in range(3))
     network = {**network, "bandwidth_single_stream_mb_s": network["bandwidth_mb_s"], "bandwidth_concurrent_mb_s": concurrent,
                "bandwidth_mb_s": max(network["bandwidth_mb_s"], concurrent)}
     host = host_info()
     region = client_region(host)
-    out = {"created_at": datetime.now(UTC).isoformat(), "dataset": dataset.name, **network, "host": host,
-           "client_region": region, "data_region": dataset.region, "in_region": region == dataset.region}
-    path = Path(args.out or RESULTS / f"probes-{dataset.name}.json")
+    out = {"created_at": datetime.now(UTC).isoformat(), "dataset": dataset.name, "transport": dataset.transport, **network, "host": host,
+           "client_region": region, "data_region": dataset.region, "in_region": region == dataset.region and dataset.transport == "s3"}
+    path = Path(args.out or RESULTS / f"probes-{tag(dataset)}.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=2) + "\n")
     print(json.dumps(out, indent=2))
@@ -214,7 +249,7 @@ def cmd_probe(args: argparse.Namespace) -> int:
 
 
 def cmd_gate(args: argparse.Namespace) -> int:
-    dataset = DATASETS[args.dataset]
+    dataset = get_dataset(args.dataset, args.transport)
     payload = load_manifest(dataset, args.window)
     # a batch reads what a pancake reads, over more observations; the pancake gate covers it
     cases = args.case or [c for c in headline_cases(args.window) if c.workload != "batch" and not (c.workload == "pancake" and c.size != 1)]
@@ -230,7 +265,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
-def stamp(row: Row, dataset: Dataset, window: str, run_id: str, session: str) -> None:
+def stamp(row: Row, dataset: Dataset, window: str, run_id: str, session: str, payload_ids: dict[str, str] | None = None) -> None:
     prov, host = provenance(), host_info()
     row.run_id, row.session_id = run_id, session
     row.git_sha, row.uv_lock_sha256, row.packages = prov["git_sha"], prov["uv_lock_sha256"], prov["packages"]
@@ -241,6 +276,9 @@ def stamp(row: Row, dataset: Dataset, window: str, run_id: str, session: str) ->
     row.host_kind, row.instance_type, row.availability_zone = host["host_kind"], host["instance_type"], host["availability_zone"]
     row.cpu_model, row.nproc = host["cpu_model"], host["nproc"]
     row.client_region = client_region(host)
+    row.transport = dataset.transport
+    if row.arm == "virtual_dmrpp":
+        row.snapshot_id, row.index_location = (payload_ids or {}).get(dataset.transport), "local-disk"
     gates = gate_path(dataset, window)
     if gates.exists():
         row.gate_status = json.loads(gates.read_text())["verdicts"].get(row.arm or "", "not gated")
@@ -252,40 +290,44 @@ def cmd_trial(args: argparse.Namespace) -> int:
     import psutil
 
     startup = time.time() - psutil.Process().create_time()
-    dataset = DATASETS[args.dataset]
+    dataset = get_dataset(args.dataset, args.transport)
     payload = load_manifest(dataset, args.case.window)
     probes = json.loads(Path(args.probes).read_text()) if args.probes else None
     settings = json.loads(args.settings) if args.settings else None
     region = client_region(host_info())
     row = run_trial(make_arm(args.arm, dataset, payload, settings), dataset, args.case, args.measure, rep=args.rep, probes=probes,
-                    instance_rate_usd_h=args.instance_rate_usd_h, warm=not args.no_warm, in_region=region == dataset.region)
+                    instance_rate_usd_h=args.instance_rate_usd_h, warm=not args.no_warm, in_region=region == dataset.region and dataset.transport == "s3")
     row.startup_seconds = startup
-    stamp(row, dataset, args.case.window, args.run_id, args.session)
+    stamp(row, dataset, args.case.window, args.run_id, args.session, payload.get("dmrpp_snapshot_ids"))
     print(row.to_json())
     return 0 if row.status == "ok" else 1
 
 
-def plan(arms: tuple[str, ...], cases: list[Case], reps: int, variants: list[tuple[str, dict[str, Any]]], seed: int = 20250314) -> list[dict[str, Any]]:
+def plan(
+    arms: tuple[str, ...], cases: list[Case], reps: int, variants: list[tuple[str, dict[str, Any]]], seed: int = 20250314,
+    measures: tuple[str, ...] = MEASURES,
+) -> list[dict[str, Any]]:
     """Every (arm, case, measure) once per repetition, order shuffled inside each repetition."""
     rng = random.Random(seed)
     specs = []
     for rep in range(reps):
-        block = [{"arm": arm, "case": case, "measure": measure, "rep": rep, "settings": {}} for arm in arms for case in cases for measure in MEASURES]
-        block += [{"arm": arm, "case": case, "measure": "full", "rep": rep, "settings": settings} for arm, settings in variants if arm in arms for case in cases if case.workload == "box"]
+        block = [{"arm": arm, "case": case, "measure": measure, "rep": rep, "settings": {}} for arm in arms for case in cases for measure in measures]
+        if "full" in measures:
+            block += [{"arm": arm, "case": case, "measure": "full", "rep": rep, "settings": settings} for arm, settings in variants if arm in arms for case in cases if case.workload == "box"]
         rng.shuffle(block)
         specs += block
     return specs
 
 
 def cmd_session(args: argparse.Namespace) -> int:
-    dataset = DATASETS[args.dataset]
+    dataset = get_dataset(args.dataset, args.transport)
     payload = load_manifest(dataset, args.window)
     for arm in args.arms:
         make_arm(arm, dataset, payload)  # refuses arms that are not built
     cases = args.case or headline_cases(args.window)
     variants = [(arm, json.loads(settings)) for arm, settings in (v.split("=", 1) for v in args.variants)]
-    specs = plan(args.arms, cases, args.reps, variants)
-    print(f"{len(specs)} trials: {len(args.arms)} arms × {len(cases)} cases × {len(MEASURES)} measures × {args.reps} repetitions"
+    specs = plan(args.arms, cases, args.reps, variants, measures=args.measures)
+    print(f"{len(specs)} trials: {len(args.arms)} arms × {len(cases)} cases × {len(args.measures)} measures × {args.reps} repetitions"
           f"{' + variants' if variants else ''}, each a fresh process, over {len(payload['granules'])} pinned granules")
     gates = gate_path(dataset, args.window)
     verdicts = json.loads(gates.read_text())["verdicts"] if gates.exists() else {}
@@ -296,7 +338,7 @@ def cmd_session(args: argparse.Namespace) -> int:
     if not args.yes:
         print("re-run with --yes to start")
         return 2
-    probes = args.probes or str(RESULTS / f"probes-{dataset.name}.json")
+    probes = args.probes or str(RESULTS / f"probes-{tag(dataset)}.json")
     if not Path(probes).exists():
         print(f"warning: no probes at {probes}; floor_seconds will be null (run `run.py probe` first)", file=sys.stderr)
         probes = None
@@ -307,7 +349,7 @@ def cmd_session(args: argparse.Namespace) -> int:
         for index, spec in enumerate(specs):
             cmd = [sys.executable, "-m", "benchmarks.trade_study.run", "trial", "--dataset", dataset.name, "--arm", spec["arm"],
                    "--case", str(spec["case"]), "--measure", spec["measure"], "--rep", str(spec["rep"]), "--run-id", args.run_id,
-                   "--session", args.session, "--instance-rate-usd-h", str(args.instance_rate_usd_h)]
+                   "--session", args.session, "--instance-rate-usd-h", str(args.instance_rate_usd_h), "--transport", dataset.transport]
             if spec["settings"]:
                 cmd += ["--settings", json.dumps(spec["settings"])]
             if probes:
@@ -323,7 +365,7 @@ def cmd_session(args: argparse.Namespace) -> int:
             except subprocess.TimeoutExpired:
                 reason, tail = f"timeout after {args.timeout_s:.0f} s", ""
             if row is None:
-                row = Row(run_id=args.run_id, session_id=args.session, dataset=dataset.name, arm=spec["arm"], arm_variant=spec["settings"],
+                row = Row(run_id=args.run_id, session_id=args.session, dataset=dataset.name, transport=dataset.transport, arm=spec["arm"], arm_variant=spec["settings"],
                           workload=spec["case"].workload, case_size=spec["case"].size, window=spec["case"].window, measure=spec["measure"],
                           repetition=spec["rep"], status=f"subprocess: {reason}", error=tail)
             failed += row.status != "ok"
@@ -349,10 +391,10 @@ def cmd_superchunks(args: argparse.Namespace) -> int:
 
     from benchmarks.tempo_no2.backends import build_store, store_path
 
-    dataset = DATASETS[args.dataset]
+    dataset = get_dataset(args.dataset, args.transport)
     payload = load_manifest(dataset, args.window)
     spec = dataset.store_spec(dataset.auth())
-    probes_path = RESULTS / f"probes-{dataset.name}.json"
+    probes_path = RESULTS / f"probes-{tag(dataset)}.json"
     probes = json.loads(probes_path.read_text()) if probes_path.exists() else None
     n = len(payload["granules"])
     path = store_path(spec, payload["granules"][0]["source_url"])
@@ -370,7 +412,7 @@ def cmd_superchunks(args: argparse.Namespace) -> int:
     out = {"created_at": datetime.now(UTC).isoformat(), "dataset": dataset.name, "window": args.window, "max_bytes": args.max_mib * 2**20,
            "layout_from": payload["granules"][0]["granule_ur"], "assumption": "every granule has the first granule's chunk layout",
            "probes": {k: probes[k] for k in ("rtt_ms_median", "bandwidth_mb_s")} if probes else None, "rows": rows}
-    target = RESULTS / f"superchunks-{dataset.name}-{args.window}.json"
+    target = RESULTS / f"superchunks-{tag(dataset)}-{args.window}.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(out, indent=2) + "\n")
     print("| Case | Granules | Grouping | Requests | MB read | Over-read | Floor s |\n|---|---:|---|---:|---:|---:|---:|")
@@ -391,13 +433,16 @@ def main(argv: list[str] | None = None) -> int:
         s.set_defaults(fn=fn)
         if dataset:
             s.add_argument("--dataset", choices=sorted(DATASETS), default="goes19")
+            s.add_argument("--transport", choices=("s3", "https"), default="s3",
+                           help="s3: direct, from the data's region; https: the DAAC's distribution endpoint with an Earthdata token, from anywhere")
         if dataset and window:
             s.add_argument("--window", default="1h", help="1h (GOES-19 only), 1d, 1w or 1m")
         return s
 
     add("status", cmd_status, "the scope tables with each row's real status", dataset=False)
     add("discover", cmd_discover, "find and pin the window's granules; times the search (network)")
-    add("build-store", cmd_build_store, "write virtual references for the pinned granules to a local Icechunk store (network)")
+    s = add("build-store", cmd_build_store, "write virtual references for the pinned granules to a local Icechunk store (network)")
+    s.add_argument("--source", choices=("hdf5", "dmrpp"), default="hdf5", help="build from the files' HDF5 metadata, or from OPeNDAP's DMR++ sidecars")
     s = add("probe", cmd_probe, "round-trip time and bandwidth to the source bucket (network)")
     s.add_argument("--out")
     s.add_argument("--range-reads", type=int, default=5)
@@ -422,6 +467,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--arms", type=parse_arms, default=DEFAULT_ARMS)
     s.add_argument("--case", type=parse_case, action="append", help="repeatable; default: the headline cases for the window")
     s.add_argument("--reps", type=int, default=10)
+    s.add_argument("--measures", type=parse_arms, default=MEASURES, help="comma-separated: first_byte,full (default both)")
     s.add_argument("--variants", action="append", default=[], help='arm=JSON, run on the box case, e.g. \'tuned_h5py={"max_workers": 1}\'')
     s.add_argument("--probes")
     s.add_argument("--timeout-s", type=float, default=1800)

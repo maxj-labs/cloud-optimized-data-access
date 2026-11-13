@@ -16,13 +16,14 @@ TIME_PARTS = ("auth_seconds", "manifest_seconds", "chunk_id_seconds", "byte_seco
 MEDIANS = (*TIME_PARTS, "first_byte_seconds", "last_byte_seconds", "end_to_end_seconds", "warm_seconds", "startup_seconds",
            "request_count", "bytes_requested", "net_rx_bytes", "floor_seconds", "peak_rss_bytes",
            "requests_usd", "transfer_usd", "compute_usd", "cost_usd")
-KEYS = ["dataset", "arm", "variant", "workload", "case_size", "window", "measure", "in_region"]
+KEYS = ["dataset", "transport", "arm", "variant", "workload", "case_size", "window", "measure", "in_region"]
 
 
 def load(run_dir: Path) -> pd.DataFrame:
     rows = [json.loads(line) for line in (run_dir / "results.jsonl").read_text().splitlines() if line.strip()]
     df = pd.DataFrame(rows)
     df["variant"] = df["arm_variant"].apply(lambda v: json.dumps(v, sort_keys=True) if v else "")
+    df["transport"] = df["transport"].fillna("s3") if "transport" in df else "s3"
     return df
 
 
@@ -64,8 +65,10 @@ def render(summary: dict[str, Any]) -> str:
     out = [f"# Trade-study run `{summary['run_id']}`", "", f"{summary['rows']} trials, {summary['failed']} failed. Medians of cold runs, one fresh process each."]
     if cells:
         c = cells[0]
-        where = "in region" if c["in_region"] else f"**out of region** (client region: {c['client_region'] or 'unknown, not AWS'}; host: {c['host_kind']})"
-        context = (f"Client: {where}. Virtual-store index read from: {c['index_location']}. "
+        transports = ", ".join(sorted({x["transport"] for x in cells}))
+        place = "in region" if c["in_region"] else f"**out of region** (client region: {c['client_region'] or 'unknown, not AWS'}; host: {c['host_kind']})"
+        where = f"Transport: {transports}. Client: {place}"
+        context = (f"{where}. Virtual-store index read from: {c['index_location']}. "
                    f"Discovery ({c['discovery_kind']}): {_s(c['discovery_seconds'])} s, measured when the granules were pinned; not in first byte.")
         out += ["", context]
     for dataset in sorted({c["dataset"] for c in cells}):
