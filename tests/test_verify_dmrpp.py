@@ -134,3 +134,12 @@ def test_pick_without_a_gap_filter_keeps_files_older_than_their_sidecar():
     rows = [{"concept_id": "C1", "data_newer_by_s": "-9", "granule_ur": "fresh"}, {"concept_id": "C2", "data_newer_by_s": "", "granule_ur": "unknown"}]
     assert len(verify.pick(rows, per_collection=1, min_gap_days=None, limit=None)) == 2
     assert verify.pick(rows, per_collection=1, min_gap_days=0, limit=None) == [rows[1]]
+
+
+def test_flattened_sidecar_names_are_matched_to_grouped_file_names():
+    file_names = {"/data_01/time", "/data_01/ku/range", "/lat"}
+    assert verify.unflatten({"/data_01_time", "/data_01_ku_range", "/other"}, file_names) == {
+        "/data_01_time": "/data_01/time", "/data_01_ku_range": "/data_01/ku/range",
+    }
+    assert verify.unflatten({"/data_01/time"}, file_names) == {}  # names already shared: nothing to do
+    assert verify.unflatten({"/lat_x"}, {"/lat"}) == {}

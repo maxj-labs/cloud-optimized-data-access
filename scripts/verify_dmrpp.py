@@ -87,7 +87,7 @@ CMR = "https://cmr.earthdata.nasa.gov/search/granules.umm_json"
 FIELDS = ["verdict", "provider", "short_name", "granule_ur", "file_format", "data_newer_by_days", "variables_compared", "chunks_compared",
           "chunks_mismatched", "variables_mismatched", "only_in_sidecar", "only_in_file", "file_size", "sidecar_max_byte",
           "first_mismatch", "metadata_differences", "filter_order_differs", "int8_declared_int16", "file_int8_variables",
-          "sidecar_version", "sidecar_cf_markers", "sidecar_hdf5_global", "sidecar_int8_variables", "hyrax_values", "hyrax_detail", "data_url"]
+          "sidecar_version", "sidecar_cf_markers", "sidecar_hdf5_global", "sidecar_int8_variables", "sidecar_flattened", "hyrax_values", "hyrax_detail", "data_url"]
 HYRAX = "https://opendap.earthdata.nasa.gov"
 HYRAX_TIMEOUT_S = 120  # per request; a slow or failing Hyrax answer is recorded, not waited on
 FILTER_NAMES = {"zlib": "deflate", "gzip": "deflate", "deflate": "deflate", "shuffle": "shuffle", "fletcher32": "fletcher32", "zstd": "zstd", "blosc": "blosc", "lz4": "lz4"}
@@ -319,12 +319,20 @@ def verify(
         # the sidecar parser returns one group per call, so ask for each group the file has
         sidecar_index: dict[str, dict[str, dict[str, Any]]] = {}
         sidecar_meta: dict[str, dict[str, Any]] = {}
-        for path in group_paths(file_group) or [""]:
+        has_groups = b"<Group " in sidecar_text
+        for path in (group_paths(file_group) or [""]) if has_groups else [""]:
             part = DMRParser(root=sidecar_root, data_filepath=url).parse_dataset(object_store=store, group=path or "/")._group
             sidecar_index.update(manifests(part, path, recurse=False))
             sidecar_meta.update(describe(part, path, recurse=False))
         stage = "comparing"
-        out.update(compare(sidecar_index, manifests(file_group), size, sidecar_meta, file_meta))
+        file_index = manifests(file_group)
+        renamed = unflatten(set(sidecar_index), set(file_index))
+        if renamed:
+            # an older sidecar with no groups: /data_01/ku/time is listed as /data_01_ku_time
+            sidecar_index = {renamed.get(n, n): v for n, v in sidecar_index.items()}
+            sidecar_meta = {renamed.get(n, n): v for n, v in sidecar_meta.items()}
+        out["sidecar_flattened"] = bool(renamed)
+        out.update(compare(sidecar_index, file_index, size, sidecar_meta, file_meta))
         out["int8_declared_int16"] = sum(
             file_meta[n]["dtype"].startswith("Int8") and sidecar_meta[n]["dtype"].startswith("Int16") for n in set(file_meta) & set(sidecar_meta)
         )
@@ -348,6 +356,16 @@ def verify(
 
                 traceback.print_exc()
     return out
+
+
+def unflatten(sidecar_names: set[str], file_names: set[str]) -> dict[str, str]:
+    """{sidecar name: file name} where a sidecar without groups names a grouped
+    variable by joining its path with underscores. Empty unless that explains
+    names the two sides do not already share."""
+    if sidecar_names & file_names:
+        return {}
+    flat = {"/" + name.strip("/").replace("/", "_"): name for name in file_names if name.count("/") > 1}
+    return {name: flat[name] for name in sidecar_names if name in flat}
 
 
 def sidecar_signs(text: bytes) -> dict[str, Any]:
@@ -551,7 +569,12 @@ def main(argv: list[str] | None = None) -> int:
         detail = f"{result.get('chunks_mismatched')} of {result.get('chunks_compared')} chunks differ" if "chunks_compared" in result else ""
         print(f"[{index}/{len(rows)}] {result['verdict']:<18} {result.get('short_name') or ''} {row['data_url'].rsplit('/', 1)[-1]} {detail}", flush=True)
         if "sidecar_cf_markers" in result and result.get("file_int8_variables") is not None:
-            wrong = "8-bit declared as Int16" if result.get("int8_declared_int16") else ("8-bit declared correctly" if result["file_int8_variables"] else "no signed 8-bit variables")
+            if not result.get("variables_compared"):
+                wrong = "not compared"
+            elif result.get("int8_declared_int16"):
+                wrong = "8-bit declared as Int16"
+            else:
+                wrong = "8-bit declared correctly" if result["file_int8_variables"] else "no signed 8-bit variables"
             cross[("older sidecar (has fullnamepath)" if result["sidecar_cf_markers"] else "newer sidecar (no fullnamepath)", wrong)] += 1
         for note in (result.get("first_mismatch"), result.get("metadata_differences")):
             if note:
