@@ -142,13 +142,27 @@ def compare_metadata(sidecar: dict[str, dict[str, Any]], file: dict[str, dict[st
     for name in sorted(set(sidecar) & set(file)):
         a, b = sidecar[name], file[name]
         for key in ("shape", "dtype", "chunks"):
-            if a[key] != b[key]:
+            if a[key] != b[key] and not (key == "chunks" and clamped(a, b)):
                 differences.append(f"{name} {key}: sidecar {short(a[key])}, file {short(b[key])}")
         if sorted(a["filters"]) != sorted(b["filters"]):
             differences.append(f"{name} filters: sidecar {a['filters']}, file {b['filters']}")
         elif a["filters"] != b["filters"]:
             reordered += 1
     return differences, reordered
+
+
+def clamped(sidecar: dict[str, Any], file: dict[str, Any]) -> bool:
+    """True when the two chunk shapes differ only because the file-side parser cut the chunk down to the array.
+
+    An unfiltered HDF5 chunk is stored whole even when the array is smaller
+    than it (a length-1 time axis in a 512-element chunk is 4096 bytes on
+    disk). The sidecar reports the chunk as stored; the file-side parser
+    reports the part the array uses. Both read the same values."""
+    a, b = tuple(sidecar["chunks"]), tuple(file["chunks"])
+    return (
+        not sidecar["filters"] and not file["filters"] and len(a) == len(b) and b == tuple(file["shape"])
+        and all(x >= y for x, y in zip(a, b, strict=True))
+    )
 
 
 def short(value: Any) -> str:
@@ -167,7 +181,12 @@ def compare(
     bad_variables, first = [], None
     for name in shared:
         a, b = sidecar[name], file[name]
-        differing = [k for k in sorted(set(a) & set(b)) if (a[k]["offset"], a[k]["length"]) != (b[k]["offset"], b[k]["length"])]
+        whole = name in (sidecar_meta or {}) and name in (file_meta or {}) and clamped(sidecar_meta[name], file_meta[name])
+        differing = [
+            k for k in sorted(set(a) & set(b))
+            if (a[k]["offset"], a[k]["length"]) != (b[k]["offset"], b[k]["length"])
+            and not (whole and a[k]["offset"] == b[k]["offset"] and a[k]["length"] >= b[k]["length"])
+        ]
         chunks += len(set(a) & set(b))
         mismatched += len(differing)
         if differing:
@@ -278,7 +297,7 @@ class Access:
 
 def verify(
     row: dict[str, str], access: Access, traceback_wanted: bool = False, values: str = "none", value_variables: int = 3,
-    value_edge: int = 256,
+    value_edge: int = 256, max_gb: float | None = None,
 ) -> dict[str, Any]:
     from xml.etree import ElementTree
 
@@ -297,6 +316,9 @@ def verify(
         registry = ObjectStoreRegistry({root: store})
         key = url[len(root):].lstrip("/")
         size = int(obstore.head(store, key)["size"])
+        if max_gb is not None and size > max_gb * 1e9:
+            out["verdict"], out["file_size"] = f"skipped: file is {size / 1e9:,.0f} GB (--max-gb {max_gb:g})", size
+            return out
         magic = bytes(obstore.get_range(store, key, start=0, end=8))
         file_meta: dict[str, dict[str, Any]] = {}
         if magic.startswith(b"CDF"):
@@ -534,6 +556,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="also compare what Hyrax serves with a direct read: for granules that did not match (default when given), or for all")
     p.add_argument("--value-variables", type=int, default=3, help="variables to compare per granule")
     p.add_argument("--value-edge", type=int, default=256, help="compare a block of at most this many elements per dimension, from the middle of each variable")
+    p.add_argument("--max-gb", type=float, default=20, help="skip files larger than this; reading the index of a very large file can take hours (0: no limit)")
     p.add_argument("--start", type=int, default=1, help="begin at this granule number (as printed), to continue an interrupted run")
     p.add_argument("--traceback", action="store_true", help="print the full traceback when a granule errors")
     p.add_argument("--out", help="write verdicts to this CSV as well as the screen")
@@ -564,7 +587,7 @@ def main(argv: list[str] | None = None) -> int:
     for index, row in enumerate(rows, 1):
         if index < args.start:
             continue
-        result = verify(row, access, args.traceback, args.values, args.value_variables, args.value_edge)
+        result = verify(row, access, args.traceback, args.values, args.value_variables, args.value_edge, args.max_gb or None)
         tally["error" if result["verdict"].startswith("error") else result["verdict"]] += 1
         detail = f"{result.get('chunks_mismatched')} of {result.get('chunks_compared')} chunks differ" if "chunks_compared" in result else ""
         print(f"[{index}/{len(rows)}] {result['verdict']:<18} {result.get('short_name') or ''} {row['data_url'].rsplit('/', 1)[-1]} {detail}", flush=True)

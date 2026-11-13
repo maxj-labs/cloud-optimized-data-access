@@ -143,3 +143,14 @@ def test_flattened_sidecar_names_are_matched_to_grouped_file_names():
     }
     assert verify.unflatten({"/data_01/time"}, file_names) == {}  # names already shared: nothing to do
     assert verify.unflatten({"/lat_x"}, {"/lat"}) == {}
+
+
+def test_an_unfiltered_chunk_stored_whole_for_a_smaller_array_is_not_a_mismatch():
+    sidecar_meta = {"/time": meta(shape=(1,), dtype="Float64(endianness='little')", chunks=(512,), filters=())}
+    file_meta = {"/time": meta(shape=(1,), dtype="Float64(endianness='little')", chunks=(1,), filters=())}
+    out = verify.compare({"/time": {"0": chunk(49243, 4096)}}, {"/time": {"0": chunk(49243, 8)}}, 10**6, sidecar_meta, file_meta)
+    assert out["verdict"] == "match" and out["chunks_mismatched"] == 0
+    moved = verify.compare({"/time": {"0": chunk(100, 4096)}}, {"/time": {"0": chunk(49243, 8)}}, 10**6, sidecar_meta, file_meta)
+    assert moved["verdict"] == "MISMATCH"
+    packed = {"/time": dict(sidecar_meta["/time"], filters=["deflate"])}
+    assert verify.compare({"/time": {"0": chunk(49243, 4096)}}, {"/time": {"0": chunk(49243, 8)}}, 10**6, packed, file_meta)["verdict"] == "MISMATCH"
