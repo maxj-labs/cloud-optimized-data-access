@@ -154,3 +154,52 @@ def test_an_unfiltered_chunk_stored_whole_for_a_smaller_array_is_not_a_mismatch(
     assert moved["verdict"] == "MISMATCH"
     packed = {"/time": dict(sidecar_meta["/time"], filters=["deflate"])}
     assert verify.compare({"/time": {"0": chunk(49243, 4096)}}, {"/time": {"0": chunk(49243, 8)}}, 10**6, packed, file_meta)["verdict"] == "MISMATCH"
+
+
+SIDECAR_XML = b"""<Dataset xmlns="http://xml.opendap.org/ns/DAP/4.0#" xmlns:dmrpp="http://xml.opendap.org/dap/dmrpp/1.0.0#" name="f.hdf">
+  <Group name="Grid">
+    <Float64 name="Latitude">
+      <dmrpp:chunks byteOrder="LE"><dmrpp:chunk offset="8068541" nBytes="13572" href="OPeNDAP_DMRpp_SC_DATA_ACCESS_URL"/></dmrpp:chunks>
+    </Float64>
+    <Group name="Data_Fields">
+      <Int16 name="ET"><dmrpp:chunks byteOrder="BE"><dmrpp:chunk offset="3622" nBytes="32"/></dmrpp:chunks></Int16>
+      <Byte name="QC"><Attribute name="_FillValue" type="String"><Value>NA</Value></Attribute><dmrpp:chunks byteOrder="BE"><dmrpp:chunk offset="20398" nBytes="26"/></dmrpp:chunks></Byte>
+    </Group>
+  </Group>
+</Dataset>"""
+
+
+def test_sidecar_groups_byte_order_and_external_chunks_are_read_from_the_xml():
+    from xml.etree import ElementTree
+
+    root = ElementTree.fromstring(SIDECAR_XML)
+    assert verify.sidecar_group_paths(root) == ["/Grid", "/Grid/Data_Fields"]
+    notes = verify.sidecar_notes(root)
+    assert notes == {
+        "/Grid/Latitude": {"big_endian": False, "external": True, "text_fill": False},
+        "/Grid/Data_Fields/ET": {"big_endian": True, "external": False, "text_fill": False},
+        "/Grid/Data_Fields/QC": {"big_endian": True, "external": False, "text_fill": True},
+    }
+    index = {"/Grid/Latitude": {"0.0": chunk(8068541, 13572)}, "/Grid/Data_Fields/ET": {"0.0": chunk(3622, 32)}}
+    meta = {
+        "/Grid/Latitude": {"dtype": "Float64(endianness='little')"},
+        "/Grid/Data_Fields/ET": {"dtype": "Int16(endianness='little')"},
+        "/Grid/Data_Fields/QC": {"dtype": "UInt8()"},
+    }
+    assert verify.apply_sidecar_notes(index, meta, notes) == 1
+    assert "/Grid/Latitude" not in index and "/Grid/Latitude" not in meta
+    assert meta["/Grid/Data_Fields/ET"]["dtype"] == "Int16(endianness='big')"
+    assert meta["/Grid/Data_Fields/QC"]["dtype"] == "UInt8()"
+
+
+def test_hdf4_names_are_matched_by_a_last_name_unique_on_both_sides():
+    sidecar = {"/G1/Data_Fields/ET", "/G1/Data_Fields/QC", "/G2/Data_Fields/QC", "/G1/Data_Fields/Cloud_Top", "/inlined"}
+    file = {"/ET", "/QC", "/Cloud Top"}
+    assert verify.match_by_leaf(sidecar, file) == {"/G1/Data_Fields/ET": "/ET", "/G1/Data_Fields/Cloud_Top": "/Cloud Top"}
+    assert verify.match_by_leaf({"/ET"}, {"/ET"}) == {}
+
+
+def test_hdf4_value_check_asks_hyrax_only_for_variables_with_a_sidecar_name():
+    meta = {"/ET": {"dtype": "Int16"}, "/QC": {"dtype": "UInt16"}}
+    assert verify.value_candidates("HDF4", meta, {"/ET": "/Grid/Data_Fields/ET"}) == {"/ET": {"dtype": "Int16"}}
+    assert verify.value_candidates("HDF5", meta, {}) == meta
