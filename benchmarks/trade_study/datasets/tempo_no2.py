@@ -164,15 +164,17 @@ class TempoNo2(Dataset):
             links = [link for link in granule.data_links(access="direct") if link.endswith(".nc")]
             if not links:
                 raise RuntimeError(f"No direct S3 netCDF link for {granule['meta']['concept-id']}")
-            records.append({
-                "granule_ur": umm["GranuleUR"],
-                "concept_id": granule["meta"]["concept-id"],
-                "revision_id": granule["meta"].get("revision-id"),
-                "start_time": temporal["BeginningDateTime"],
-                "end_time": temporal["EndingDateTime"],
-                "source_url": links[0],
-                "source_size_mb": netcdf_file.get("Size"),
-            })
+            records.append(
+                {
+                    "granule_ur": umm["GranuleUR"],
+                    "concept_id": granule["meta"]["concept-id"],
+                    "revision_id": granule["meta"].get("revision-id"),
+                    "start_time": temporal["BeginningDateTime"],
+                    "end_time": temporal["EndingDateTime"],
+                    "source_url": links[0],
+                    "source_size_mb": netcdf_file.get("Size"),
+                }
+            )
         if not records:
             raise RuntimeError(f"CMR returned no granules for window {window}")
         return sorted(records, key=lambda record: record["start_time"])
@@ -230,7 +232,9 @@ class TempoNo2(Dataset):
         tuning = {key: value for key, value in settings.items() if key.startswith("icechunk_")}
         return open_mirror_repo(self.transport, tuning)
 
-    def open_virtual(self, payload: dict[str, Any], settings: dict[str, Any], source: str = "hdf5") -> tuple[Any, np.ndarray]:
+    def open_virtual(
+        self, payload: dict[str, Any], settings: dict[str, Any], source: str = "hdf5"
+    ) -> tuple[Any, np.ndarray]:
         import xarray as xr
 
         if source == "dmrpp":

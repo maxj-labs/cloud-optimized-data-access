@@ -147,7 +147,10 @@ def test_figure_labels_and_names():
     assert figures.bar_label("virtual_icechunk", '{"zarr_concurrency": 4}') == "Virtual store, zarr_concurrency=4"
     cell = {"dataset": "tempo_no2", "transport": "https", "workload": "churro", "case_size": 10, "window": "1d"}
     assert figures.figure_name(cell) == "tempo_no2-https_churro_10_1d.svg"
-    assert figures.setup_and_read({"auth_seconds": None, "manifest_seconds": 1.5, "end_to_end_seconds": 4.0}) == (1.5, 2.5)
+    assert figures.setup_and_read({"auth_seconds": None, "manifest_seconds": 1.5, "end_to_end_seconds": 4.0}) == (
+        1.5,
+        2.5,
+    )
 
 
 # --- results from the first TEMPO benchmark ---------------------------------------

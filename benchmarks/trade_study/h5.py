@@ -72,7 +72,9 @@ def _read_points(dataset: h5py.Dataset, selection: Selection) -> np.ndarray:
     return values
 
 
-def read_selection(handle: h5py.File, spec: dict[str, Any], selection: Selection) -> tuple[np.datetime64, list[np.ndarray]]:
+def read_selection(
+    handle: h5py.File, spec: dict[str, Any], selection: Selection
+) -> tuple[np.datetime64, list[np.ndarray]]:
     """The observation time and each variable's decoded values for one open granule.
     ``spec`` is :meth:`benchmarks.trade_study.datasets.base.Dataset.h5_spec`."""
     values = []

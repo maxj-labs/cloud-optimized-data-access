@@ -352,11 +352,13 @@ class VirtualIcechunk(Arm):
         if zarrs:
             # zarrs decodes chunks in Rust, in parallel, without the interpreter lock. Keys are set
             # one by one: replacing the whole codec_pipeline block drops zarr's own batch_size.
-            zarr.config.set({
-                "codec_pipeline.path": "zarrs.ZarrsCodecPipeline",
-                "codec_pipeline.chunk_concurrent_minimum": 4,
-                "codec_pipeline.strict": False,
-            })
+            zarr.config.set(
+                {
+                    "codec_pipeline.path": "zarrs.ZarrsCodecPipeline",
+                    "codec_pipeline.chunk_concurrent_minimum": 4,
+                    "codec_pipeline.strict": False,
+                }
+            )
         self._data, self._time_index = self.dataset.open_virtual(self.payload, self.given, self.source)
         self.settings = {
             "client": "icechunk",

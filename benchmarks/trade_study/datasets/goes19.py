@@ -93,12 +93,14 @@ class Goes19(Dataset):
                     y, julian_day, hh, mm, ss = (int(group) for group in match.groups())
                     seconds = ((julian_day - 1) * 24 + hh) * 3600 + mm * 60 + ss
                     start = np.datetime64(f"{y}-01-01T00:00:00") + np.timedelta64(seconds, "s")
-                    records.append({
-                        "granule_ur": path.rsplit("/", 1)[-1],
-                        "start_time": f"{start}Z",
-                        "source_url": f"s3://{self.bucket}/{path}",
-                        "source_size_mb": meta["size"] / 1e6,
-                    })
+                    records.append(
+                        {
+                            "granule_ur": path.rsplit("/", 1)[-1],
+                            "start_time": f"{start}Z",
+                            "source_url": f"s3://{self.bucket}/{path}",
+                            "source_size_mb": meta["size"] / 1e6,
+                        }
+                    )
         if not records:
             raise RuntimeError(f"no {self.band} granules listed for window {window}")
         return sorted(records, key=lambda record: record["start_time"])
@@ -191,7 +193,9 @@ class Goes19(Dataset):
         message = f"{len(parts)} granules, window {payload['window']}"
         return write_local_repository(path, concat_granules(parts, self.dims[0]), container, message), path
 
-    def open_virtual(self, payload: dict[str, Any], settings: dict[str, Any], source: str = "hdf5") -> tuple[Any, np.ndarray]:
+    def open_virtual(
+        self, payload: dict[str, Any], settings: dict[str, Any], source: str = "hdf5"
+    ) -> tuple[Any, np.ndarray]:
         import icechunk
         import xarray as xr
 
@@ -203,7 +207,9 @@ class Goes19(Dataset):
                 f"{path} missing: run `run.py build-store --dataset {self.name} --window {payload['window']}`"
             )
         access = icechunk.containers_credentials({f"s3://{self.bucket}/": icechunk.s3_anonymous_credentials()})
-        repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(path)), authorize_virtual_chunk_access=access)
+        repo = icechunk.Repository.open(
+            icechunk.local_filesystem_storage(str(path)), authorize_virtual_chunk_access=access
+        )
         if any(key.startswith("icechunk_") for key in settings):
             repo = repo.reopen(config=icechunk_config(repo, settings), authorize_virtual_chunk_access=access)
         session = repo.readonly_session(snapshot_id=payload["snapshot_id"])

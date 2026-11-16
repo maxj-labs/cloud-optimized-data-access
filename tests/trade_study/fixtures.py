@@ -41,7 +41,9 @@ def expected_flag(i: int, lat: int, lon: int) -> np.ndarray:
     return ((np.arange(lat)[:, None] + np.arange(lon)[None, :] + i) % 3).astype("int16")[None]
 
 
-def make_granules(tmp_path: Path, n: int = 2, lat: int = 60, lon: int = 80, chunks: tuple[int, int] = (20, 40)) -> list[Path]:
+def make_granules(
+    tmp_path: Path, n: int = 2, lat: int = 60, lon: int = 80, chunks: tuple[int, int] = (20, 40)
+) -> list[Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     lats = np.linspace(20.0, 50.0, lat, dtype="float32")
     lons = np.linspace(-120.0, -70.0, lon, dtype="float32")
@@ -62,7 +64,13 @@ def make_granules(tmp_path: Path, n: int = 2, lat: int = 60, lon: int = 80, chun
                 ("main_data_quality_flag", expected_flag(i, lat, lon), FLAG_FILL),
             ):
                 ds = product.create_dataset(
-                    name, data=data, chunks=(1, *chunks), shuffle=True, compression="gzip", compression_opts=1, fillvalue=fill
+                    name,
+                    data=data,
+                    chunks=(1, *chunks),
+                    shuffle=True,
+                    compression="gzip",
+                    compression_opts=1,
+                    fillvalue=fill,
                 )
                 ds.attrs["_FillValue"] = np.array([fill], dtype=data.dtype)
                 ds.dims[0].attach_scale(t)

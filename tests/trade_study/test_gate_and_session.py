@@ -56,7 +56,9 @@ def test_an_arm_that_cannot_read_fails_the_gate_without_stopping_it(world):
     dataset, payload = world
     missing = [{**g, "source_url": g["source_url"] + ".missing"} for g in payload["granules"]]
     # the virtual arm reads through its store's own references, so it still answers; the file readers cannot
-    rows = run_gate(dataset, {**payload, "granules": missing}, ("virtual_icechunk", "download"), [Case("box", 500, "1d")])
+    rows = run_gate(
+        dataset, {**payload, "granules": missing}, ("virtual_icechunk", "download"), [Case("box", 500, "1d")]
+    )
     assert len(rows) == 3 and all(row["status"].startswith("fail") for row in rows)
     assert gate_verdicts(rows, "virtual_icechunk")["download"] == "fail"
 
@@ -72,7 +74,12 @@ def test_gate_verdicts_fail_and_vacuous():
 
 
 def test_the_default_gate_skips_cases_another_case_covers():
-    assert [str(case) for case in run.gate_cases("1d")] == ["pancake:1:1d", "churro:10:1d", "churro:250:1d", "box:100:1d"]
+    assert [str(case) for case in run.gate_cases("1d")] == [
+        "pancake:1:1d",
+        "churro:10:1d",
+        "churro:250:1d",
+        "box:100:1d",
+    ]
 
 
 # --- plan -------------------------------------------------------------------------

@@ -39,10 +39,11 @@ instance.
 ## Develop
 
 ```sh
-uv run pytest             # offline; about 20 seconds
-uvx ruff check            # lint
-uvx ruff format           # format
+uv run pytest               # offline; about 20 seconds
+uvx ruff@0.17.5 check       # lint
+uvx ruff@0.17.5 format      # format
 cd decks/coda-presentation && npm ci && npm run build
 ```
 
-CI runs the same four.
+CI runs the same four (`.github/workflows/ci.yml`); the ruff version is
+pinned there, so use the same one locally.

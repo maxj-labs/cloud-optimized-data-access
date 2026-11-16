@@ -261,16 +261,19 @@ def cmd_superchunks(args: argparse.Namespace) -> int:
     max_bytes = args.max_mib * 2**20
     rows = superchunks.analyse_dataset(dataset, payload, args.window, probes, max_bytes)
     target = paths.superchunks_path(dataset, args.window)
-    write_json(target, {
-        "created_at": now(),
-        "dataset": dataset.name,
-        "window": args.window,
-        "max_bytes": max_bytes,
-        "layout_from": payload["granules"][0]["granule_ur"],
-        "assumption": "every granule has the first granule's chunk layout",
-        "probes": {key: probes[key] for key in ("rtt_ms_median", "bandwidth_mb_s")} if probes else None,
-        "rows": rows,
-    })
+    write_json(
+        target,
+        {
+            "created_at": now(),
+            "dataset": dataset.name,
+            "window": args.window,
+            "max_bytes": max_bytes,
+            "layout_from": payload["granules"][0]["granule_ur"],
+            "assumption": "every granule has the first granule's chunk layout",
+            "probes": {key: probes[key] for key in ("rtt_ms_median", "bandwidth_mb_s")} if probes else None,
+            "rows": rows,
+        },
+    )
     print(superchunks.render_table(rows))
     print(f"\nwrote {target}")
     return 0
@@ -302,7 +305,11 @@ def build_parser() -> argparse.ArgumentParser:
     add("status", cmd_status, "the scope tables with each row's real status", dataset=False)
     add("discover", cmd_discover, "find and pin the window's granules; times the search (network)")
 
-    c = add("build-store", cmd_build_store, "write virtual references for the pinned granules to a local Icechunk store (network)")
+    c = add(
+        "build-store",
+        cmd_build_store,
+        "write virtual references for the pinned granules to a local Icechunk store (network)",
+    )
     c.add_argument(
         "--source",
         choices=("hdf5", "dmrpp"),
@@ -313,7 +320,9 @@ def build_parser() -> argparse.ArgumentParser:
     c = add("probe", cmd_probe, "round-trip time and bandwidth to the source bucket (network)")
     c.add_argument("--out")
     c.add_argument("--range-reads", type=int, default=5)
-    c.add_argument("--range-mib", type=int, help="size of each bandwidth read; five must fit in one granule (default per dataset)")
+    c.add_argument(
+        "--range-mib", type=int, help="size of each bandwidth read; five must fit in one granule (default per dataset)"
+    )
 
     c = add("gate", cmd_gate, "every arm must return the first arm's values (network)")
     c.add_argument("--arms", type=parse_list, default=GATE_ARMS, help="comma-separated; the first is the reference")
@@ -327,7 +336,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--run-id", default="adhoc")
     c.add_argument("--session", default="1")
     c.add_argument("--probes")
-    c.add_argument("--settings", help='JSON of arm settings, e.g. \'{"max_workers": 1}\'')
+    c.add_argument("--settings", help="JSON of arm settings, e.g. '{\"max_workers\": 1}'")
     c.add_argument("--no-warm", action="store_true", help="skip the warm second query")
     c.add_argument("--instance-rate-usd-h", type=float, default=INSTANCE_RATE)
 
@@ -335,14 +344,18 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--run-id", required=True)
     c.add_argument("--session", default="1")
     c.add_argument("--arms", type=parse_list, default=DEFAULT_ARMS)
-    c.add_argument("--case", type=parse_case, action="append", help="repeatable; default: the headline cases for the window")
+    c.add_argument(
+        "--case", type=parse_case, action="append", help="repeatable; default: the headline cases for the window"
+    )
     c.add_argument("--reps", type=int, default=10)
-    c.add_argument("--measures", type=parse_list, default=MEASURES, help="comma-separated: first_byte,full (default both)")
+    c.add_argument(
+        "--measures", type=parse_list, default=MEASURES, help="comma-separated: first_byte,full (default both)"
+    )
     c.add_argument(
         "--variants",
         action="append",
         default=[],
-        help='arm=JSON, run on the box case, e.g. \'tuned_h5py={"max_workers": 1}\'',
+        help="arm=JSON, run on the box case, e.g. 'tuned_h5py={\"max_workers\": 1}'",
     )
     c.add_argument("--probes")
     c.add_argument("--timeout-s", type=float, default=1800)
@@ -350,11 +363,17 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--allow-ungated", action="store_true")
     c.add_argument("--yes", action="store_true", help="start after printing the plan")
 
-    c = add("report", cmd_report, "medians, paired speedups and figures → summary.json, summary.md, figures/", dataset=False)
+    c = add(
+        "report", cmd_report, "medians, paired speedups and figures → summary.json, summary.md, figures/", dataset=False
+    )
     c.add_argument("run_dir")
     c.add_argument("--no-figures", action="store_true", help="write the tables only")
 
-    c = add("superchunks", cmd_superchunks, "requests and bytes if chunks were grouped into larger reads (network: one granule's chunk index)")
+    c = add(
+        "superchunks",
+        cmd_superchunks,
+        "requests and bytes if chunks were grouped into larger reads (network: one granule's chunk index)",
+    )
     c.add_argument("--max-mib", type=int, default=64, help="largest grouped read")
     return parser
 

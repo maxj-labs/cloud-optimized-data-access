@@ -81,7 +81,9 @@ def _verdict(reference: Result | Exception, other: Result | Exception) -> tuple[
         return f"fail: {type(error).__name__}: {str(error)[:300]}", float("nan")
 
 
-def run_gate(dataset: Dataset, payload: dict[str, Any], arm_names: tuple[str, ...], cases: list[Case]) -> list[dict[str, Any]]:
+def run_gate(
+    dataset: Dataset, payload: dict[str, Any], arm_names: tuple[str, ...], cases: list[Case]
+) -> list[dict[str, Any]]:
     """Every arm against the first one. One row per (case, arm, observation). Network."""
     arms = []
     for name in arm_names:
@@ -97,14 +99,16 @@ def run_gate(dataset: Dataset, payload: dict[str, Any], arm_names: tuple[str, ..
                 results = [_read_or_error(arm, observation, selection) for arm in arms]
                 for arm, result in zip(arms[1:], results[1:], strict=True):
                     status, worst = _verdict(results[0], result)
-                    rows.append({
-                        "case": str(case),
-                        "arm": arm.name,
-                        "reference": reference.name,
-                        "observation": observation,
-                        "status": status,
-                        "max_rel_diff": worst,
-                    })
+                    rows.append(
+                        {
+                            "case": str(case),
+                            "arm": arm.name,
+                            "reference": reference.name,
+                            "observation": observation,
+                            "status": status,
+                            "max_rel_diff": worst,
+                        }
+                    )
                     message = f"gate {case} {arm.name} vs {reference.name} observation {observation}: {status}"
                     print(message, file=sys.stderr, flush=True)
     finally:

@@ -36,9 +36,7 @@ IMDS = "http://169.254.169.254/latest"
 def provenance() -> dict[str, Any]:
     """The commit, the lock file's hash and the versions of the libraries under test."""
     try:
-        git = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
-        )
+        git = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=True)
         sha = git.stdout.strip()
     except (subprocess.CalledProcessError, OSError):
         sha = None

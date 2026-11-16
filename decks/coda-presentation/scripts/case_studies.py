@@ -81,8 +81,10 @@ def nldas(path: Path) -> Path:
     _axes_style(ax)
     with plt.rc_context(HATCH):
         handles = [
-            Patch(facecolor=VIRTUAL, label="Virtual Zarr"), Patch(facecolor=OTHER, label="Other libraries"),
-            Patch(facecolor=MUTED, hatch="//", linewidth=0, label="Open the dataset"), Patch(facecolor=MUTED, label="Query"),
+            Patch(facecolor=VIRTUAL, label="Virtual Zarr"),
+            Patch(facecolor=OTHER, label="Other libraries"),
+            Patch(facecolor=MUTED, hatch="//", linewidth=0, label="Open the dataset"),
+            Patch(facecolor=MUTED, label="Query"),
         ]
         ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0, 1.0), ncol=4, frameon=False, labelcolor=INK)
     fig.tight_layout()

@@ -27,6 +27,8 @@ class ArmInfo:
     needs: str = ""
 
 
+# The tables below are kept one row per entry; the formatter is off until the end of the file.
+# fmt: off
 ARMS: tuple[ArmInfo, ...] = (
     ArmInfo("user_stack", 1, "Default user stack", "s3fs + xarray + h5netcdf, default fsspec read-ahead", "built", "As documented for users"),
     ArmInfo("tuned_h5py", 1, "Tuned h5py", "8 MiB blocks, one process per granule, page buffer when paged", "built", "NSIDC cloud-optimized HDF5 study settings"),
@@ -111,17 +113,34 @@ METRICS: tuple[tuple[str, str, str, str], ...] = (
     ("Dollars per question", "Requests, transfer and compute at list price", "cost_usd (requests_usd, transfer_usd, compute_usd)", "per trial"),
 )
 
+# fmt: on
+
 
 def render_status() -> str:
     """The scope tables in Markdown, with each row's real status."""
     out: list[str] = []
     for number, title in SECTIONS.items():
-        out += [f"### Section {number}: {title}", "", "| Arm | Name in code | Access path | Status | Who tunes it | Needs |", "|---|---|---|---|---|---|"]
-        out += [f"| {a.title} | `{a.name}` | {a.access_path} | {a.status} | {a.tuned_by} | {a.needs} |" for a in ARMS if a.section == number]
+        out += [
+            f"### Section {number}: {title}",
+            "",
+            "| Arm | Name in code | Access path | Status | Who tunes it | Needs |",
+            "|---|---|---|---|---|---|",
+        ]
+        out += [
+            f"| {a.title} | `{a.name}` | {a.access_path} | {a.status} | {a.tuned_by} | {a.needs} |"
+            for a in ARMS
+            if a.section == number
+        ]
         out.append("")
     out += ["### Datasets", "", "| Dataset | Name in code | Why | Status | Needs |", "|---|---|---|---|---|"]
     out += [f"| {d.title} | `{d.name}` | {d.why} | {d.status} | {d.needs} |" for d in DATASETS]
-    out += ["", "### Workloads", "", "| Request shape | Name in code | Cases | Scoping-doc use case |", "|---|---|---|---|"]
+    out += [
+        "",
+        "### Workloads",
+        "",
+        "| Request shape | Name in code | Cases | Scoping-doc use case |",
+        "|---|---|---|---|",
+    ]
     for w in WORKLOADS:
         cases = ", ".join(f"`{w.name}:{s}`" for s in w.sizes) + (f" ({w.size_meaning})" if w.sizes != (0,) else "")
         out.append(f"| {w.shape} | `{w.name}` | {cases} | {w.use_case} |")

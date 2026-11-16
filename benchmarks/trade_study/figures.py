@@ -32,7 +32,7 @@ VARIANT_WORDS = {"max_workers": ("process", "processes")}
 
 
 def bar_label(arm: str, variant: str) -> str:
-    """"Tuned h5py", or "Tuned h5py, 1 process" for the variant ``{"max_workers": 1}``."""
+    """ "Tuned h5py", or "Tuned h5py, 1 process" for the variant ``{"max_workers": 1}``."""
     title = ARM_INFO[arm].title if arm in ARM_INFO else arm
     if not variant:
         return title

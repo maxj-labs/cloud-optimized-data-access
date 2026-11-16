@@ -114,16 +114,18 @@ def analyse_dataset(
                 seconds = None
                 if probes:
                     seconds = floor(grouping, probes["rtt_ms_median"] / 1000, probes["bandwidth_mb_s"] * 1e6)
-                rows.append({
-                    "case": str(case),
-                    "granules": n_observations,
-                    "max_gap_bytes": grouping.max_gap,
-                    "requests": grouping.requests,
-                    "bytes_read": grouping.bytes_read,
-                    "bytes_needed": grouping.bytes_needed,
-                    "over_read": grouping.over_read,
-                    "floor_seconds": seconds,
-                })
+                rows.append(
+                    {
+                        "case": str(case),
+                        "granules": n_observations,
+                        "max_gap_bytes": grouping.max_gap,
+                        "requests": grouping.requests,
+                        "bytes_read": grouping.bytes_read,
+                        "bytes_needed": grouping.bytes_needed,
+                        "over_read": grouping.over_read,
+                        "floor_seconds": seconds,
+                    }
+                )
     return rows
 
 

@@ -200,10 +200,19 @@ def _first_byte_table(cells: list[dict[str, Any]]) -> list[str]:
               "Warm", "Requests", "MB on wire"]  # fmt: skip
     rows = [
         [
-            _case(c), str(c["observation_count"]), _arm(c["arm"], c["variant"], c["gate_status"]), str(c["n"]),
-            _s(c["auth_seconds"]), _s(c["manifest_seconds"]), _s(c["chunk_id_seconds"]), _s(c["byte_seconds"]),
-            f"**{_s(c['first_byte_seconds'])}**", f"{_s(c['min_s'])}–{_s(c['max_s'])}", _s(c["warm_seconds"], 3),
-            _requests(c), _mb(c["net_rx_bytes"]),
+            _case(c),
+            str(c["observation_count"]),
+            _arm(c["arm"], c["variant"], c["gate_status"]),
+            str(c["n"]),
+            _s(c["auth_seconds"]),
+            _s(c["manifest_seconds"]),
+            _s(c["chunk_id_seconds"]),
+            _s(c["byte_seconds"]),
+            f"**{_s(c['first_byte_seconds'])}**",
+            f"{_s(c['min_s'])}–{_s(c['max_s'])}",
+            _s(c["warm_seconds"], 3),
+            _requests(c),
+            _mb(c["net_rx_bytes"]),
         ]  # fmt: skip
         for c in _sorted_cells(cells, "first_byte")
     ]
@@ -215,10 +224,20 @@ def _full_table(cells: list[dict[str, Any]]) -> list[str]:
               "Requests", "MB on wire", "Peak RSS MB", "$ per question"]  # fmt: skip
     rows = [
         [
-            _case(c), str(c["observation_count"]), _arm(c["arm"], c["variant"], c["gate_status"]), str(c["n"]),
-            f"**{_s(c['end_to_end_seconds'])}**", f"{_s(c['min_s'])}–{_s(c['max_s'])}", _s(c["last_byte_seconds"]),
-            _s(c["warm_seconds"]), _s(c["floor_seconds"]), _s(c["floor_ratio"], 1), _requests(c),
-            _mb(c["net_rx_bytes"]), _mb(c["peak_rss_bytes"]), _s(c["cost_usd"], 6),
+            _case(c),
+            str(c["observation_count"]),
+            _arm(c["arm"], c["variant"], c["gate_status"]),
+            str(c["n"]),
+            f"**{_s(c['end_to_end_seconds'])}**",
+            f"{_s(c['min_s'])}–{_s(c['max_s'])}",
+            _s(c["last_byte_seconds"]),
+            _s(c["warm_seconds"]),
+            _s(c["floor_seconds"]),
+            _s(c["floor_ratio"], 1),
+            _requests(c),
+            _mb(c["net_rx_bytes"]),
+            _mb(c["peak_rss_bytes"]),
+            _s(c["cost_usd"], 6),
         ]  # fmt: skip
         for c in _sorted_cells(cells, "full")
     ]

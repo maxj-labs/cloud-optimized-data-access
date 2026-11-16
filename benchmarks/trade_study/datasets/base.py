@@ -103,7 +103,9 @@ class Dataset:
         """The fsspec filesystem a user would be handed."""
         raise NotImplementedError
 
-    def open_virtual(self, payload: dict[str, Any], settings: dict[str, Any], source: str = "hdf5") -> tuple[Any, np.ndarray]:
+    def open_virtual(
+        self, payload: dict[str, Any], settings: dict[str, Any], source: str = "hdf5"
+    ) -> tuple[Any, np.ndarray]:
         """(xarray dataset over the virtual store, the store's time index for each pinned granule).
         ``source`` names what the references were built from: "hdf5" or "dmrpp"."""
         raise NotImplementedError
