@@ -236,3 +236,19 @@ def test_first_benchmark_run_reports_like_any_other(first_benchmark_run):
 
 def test_rows_this_harness_writes_are_not_taken_for_old_ones():
     assert not legacy.is_legacy(json.loads(Row(arm="download", measure="full").to_json()))
+
+
+# --- the committed runs -----------------------------------------------------------
+
+COMMITTED_RUNS = sorted(
+    path.parent for path in (Path(__file__).parents[2] / "results" / "trade_study").glob("*/results.jsonl")
+)
+
+
+@pytest.mark.parametrize("run_dir", COMMITTED_RUNS, ids=lambda path: path.name)
+def test_a_committed_summary_is_what_report_writes_today(run_dir):
+    """``summary.md`` is committed so the tables can be read without running
+    anything. If this fails, run ``run.py report <run dir> --no-figures`` and
+    commit the result."""
+    assert COMMITTED_RUNS
+    assert (run_dir / "summary.md").read_text() == report.render(report.summarize(report.load(run_dir)))

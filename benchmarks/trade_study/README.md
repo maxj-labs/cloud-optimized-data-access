@@ -232,7 +232,9 @@ $run superchunks --dataset goes19 --window 1h
 
 `report` writes `summary.json`, `summary.md` and `figures/` into the run's
 directory: one figure per case, each arm's end-to-end time split into
-setup and reading.
+setup and reading. Of these, only `summary.md` is committed, beside the
+run's `results.jsonl`; a test fails when a committed `summary.md` is not
+what `report` writes today.
 
 `--window 1d` pins 144 granules; `1w` and `1m` are defined. One trial:
 `$run trial --dataset goes19 --arm tuned_h5py --case churro:10:1h --measure first_byte`.

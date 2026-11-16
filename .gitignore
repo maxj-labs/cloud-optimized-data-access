@@ -243,3 +243,6 @@ benchmarks/trade_study/stores/
 
 # the staleness inventory's working file; granules.jsonl.gz is the committed copy
 results/dmrpp_staleness/granules.jsonl
+
+# derived from results.jsonl by `run.py report`; summary.md is the committed copy
+results/trade_study/*/summary.json

@@ -2,7 +2,7 @@
 
 410 trials, 0 failed. Medians of cold runs, one fresh process each.
 
-Client: **out of region** (client region: unknown, not AWS; host: other). Virtual-store index read from: local-disk. Discovery (s3-list): 0.15 s, measured when the granules were pinned; not in first byte.
+Transport: s3. Client: **out of region** (client region: unknown, not AWS; host: other). Virtual-store index read from: local-disk. Discovery (s3-list): 0.15 s, measured when the granules were pinned; not in first byte.
 
 ## goes19: time to first byte, in parts (seconds)
 
@@ -55,6 +55,45 @@ Client: **out of region** (client region: unknown, not AWS; host: other). Virtua
 | `pancake:1:1h` | 1 | `virtual_icechunk` | 10 | **2.19** | 2.09–2.76 | 2.07 | 1.61 | 1.26 | 1.7 | ≥ 233 | 26.5 | 710.1 | 0.002595 |
 | `pancake:1:1h` | 1 | `user_stack` | 10 | **2.89** | 2.77–3.91 | 2.78 | 1.00 | 1.10 | 2.6 | 2 | 25.4 | 780.8 | 0.002448 |
 
+## goes19: paired speedups
+
+| Case | Measure | From | To | **Speedup** | 95% interval | Pairs |  |
+|---|---|---|---|---:|---|---:|---|
+| `batch:0:1h` | first_byte | `download` | `virtual_icechunk` | **2.68×** | 2.46–2.88 | 10 |  |
+| `batch:0:1h` | first_byte | `tuned_h5py` | `virtual_icechunk` | **1.92×** | 1.69–2.10 | 10 |  |
+| `batch:0:1h` | first_byte | `user_stack` | `virtual_icechunk` | **16.78×** | 14.82–17.05 | 10 |  |
+| `box:100:1h` | first_byte | `download` | `virtual_icechunk` | **2.44×** | 2.17–2.79 | 10 |  |
+| `box:100:1h` | first_byte | `tuned_h5py` | `virtual_icechunk` | **1.65×** | 1.49–1.73 | 10 |  |
+| `box:100:1h` | first_byte | `user_stack` | `virtual_icechunk` | **14.41×** | 13.65–15.21 | 10 |  |
+| `churro:10:1h` | first_byte | `download` | `virtual_icechunk` | **1.44×** | 1.32–1.68 | 10 |  |
+| `churro:10:1h` | first_byte | `tuned_h5py` | `virtual_icechunk` | **1.05×** | 0.98–1.13 | 10 |  |
+| `churro:10:1h` | first_byte | `user_stack` | `virtual_icechunk` | **8.98×** | 8.45–9.46 | 10 |  |
+| `churro:250:1h` | first_byte | `download` | `virtual_icechunk` | **1.38×** | 1.22–1.50 | 10 |  |
+| `churro:250:1h` | first_byte | `tuned_h5py` | `virtual_icechunk` | **0.99×** | 0.93–1.03 | 10 |  |
+| `churro:250:1h` | first_byte | `user_stack` | `virtual_icechunk` | **8.48×** | 8.22–8.92 | 10 |  |
+| `pancake:1:1h` | first_byte | `download` | `virtual_icechunk` | **2.66×** | 2.43–2.91 | 10 |  |
+| `pancake:1:1h` | first_byte | `tuned_h5py` | `virtual_icechunk` | **1.97×** | 1.74–2.05 | 10 |  |
+| `pancake:1:1h` | first_byte | `user_stack` | `virtual_icechunk` | **4.20×** | 4.07–4.60 | 10 |  |
+| `batch:0:1h` | full | `download` | `virtual_icechunk` | **0.94×** | 0.85–1.06 | 10 |  |
+| `batch:0:1h` | full | `tuned_h5py` | `virtual_icechunk` | **0.96×** | 0.93–1.08 | 10 |  |
+| `batch:0:1h` | full | `user_stack` | `virtual_icechunk` | **1.30×** | 1.27–1.42 | 10 |  |
+| `box:100:1h` | full | `tuned_h5py` {"max_workers": 1} | `tuned_h5py` | **0.93×** | 0.86–1.00 | 10 |  |
+| `box:100:1h` | full | `download` | `virtual_icechunk` | **11.18×** | 9.94–13.03 | 10 |  |
+| `box:100:1h` | full | `tuned_h5py` | `virtual_icechunk` | **9.29×** | 8.33–10.49 | 10 |  |
+| `box:100:1h` | full | `tuned_h5py` {"max_workers": 1} | `virtual_icechunk` | **8.77×** | 8.32–9.01 | 10 |  |
+| `box:100:1h` | full | `user_stack` | `virtual_icechunk` | **12.65×** | 12.03–13.63 | 10 |  |
+| `churro:10:1h` | full | `download` | `virtual_icechunk` | **5.66×** | 5.31–6.25 | 10 |  |
+| `churro:10:1h` | full | `tuned_h5py` | `virtual_icechunk` | **5.24×** | 4.69–5.43 | 10 |  |
+| `churro:10:1h` | full | `user_stack` | `virtual_icechunk` | **7.13×** | 6.79–7.58 | 10 |  |
+| `churro:250:1h` | full | `download` | `virtual_icechunk` | **4.93×** | 4.57–5.36 | 10 |  |
+| `churro:250:1h` | full | `tuned_h5py` | `virtual_icechunk` | **4.19×** | 3.64–4.73 | 10 |  |
+| `churro:250:1h` | full | `user_stack` | `virtual_icechunk` | **6.35×** | 5.64–6.68 | 10 |  |
+| `pancake:1:1h` | full | `download` | `virtual_icechunk` | **0.78×** | 0.76–0.79 | 10 |  |
+| `pancake:1:1h` | full | `tuned_h5py` | `virtual_icechunk` | **0.76×** | 0.72–0.78 | 10 |  |
+| `pancake:1:1h` | full | `user_stack` | `virtual_icechunk` | **1.32×** | 1.25–1.48 | 10 |  |
+
+Speedups measured in one session have no spread between sessions to be judged against: whether they are a detectable difference is not known until a second session is run.
+
 ## Reading the tables
 
 - A dash under a part means the arm does not expose that step; its time is inside Bytes:
@@ -67,4 +106,5 @@ Client: **out of region** (client region: unknown, not AWS; host: other). Virtua
 - MB on wire is the host's receive counter over the trial, so it includes other traffic on a shared host.
 - Floor = dependent round trips × median round-trip time + bytes ÷ measured bandwidth, from the session's probe.
 - $ per question = S3 requests + transfer + compute at list price. Transfer is zero in region and internet egress otherwise.
+- A speedup is the median, over trials paired by session and repetition, of one arm's seconds over another's. Its interval is a bootstrap of that median.
 - Arms marked † are not gated: their values were not checked against the reference arm.
