@@ -1,10 +1,12 @@
 # Trade-study benchmark: a minimum viable version
 
-One harness for the Cloud-Optimized Data Access trade study's scope: any
+The one harness for the Cloud-Optimized Data Access trade study's scope: any
 dataset, any arm, the same questions, with time to first byte reported in
-parts. It builds on `benchmarks/tempo_no2/` (whose access code, counters,
-floor and cost models it imports) and leaves that benchmark and the deck's
-figures untouched.
+parts. It replaced the first benchmark, which could only read TEMPO NO₂
+(see [What came from the first benchmark](#what-came-from-the-first-benchmark)).
+
+New here? Read [How the code is laid out](#how-the-code-is-laid-out), then
+run the [no-credentials example](#reproduce-no-credentials).
 
 What this version does:
 
@@ -19,7 +21,66 @@ What this version does:
 - times every trial in the scope's parts and records requests, bytes, a
   floor, and dollars;
 - gates every arm on returning the same values before its timings count;
-- bounds what superchunks can buy, from a granule's real chunk index.
+- bounds what superchunks can buy, from a granule's real chunk index;
+- reports medians, paired speedups and one figure per case.
+
+## How the code is laid out
+
+A run goes left to right through the subcommands of `run.py`, and each
+subcommand is a thin wrapper around one module:
+
+```
+discover ──► build-store ──► probe ──► gate ──► session ──► report
+(pin the     (only where no  (the      (do the  (time it;   (medians,
+ granules)    store exists)   link)     arms     one fresh   speedups,
+                                        agree?)  process     figures)
+                                                 per trial)
+```
+
+| File | What is in it |
+|---|---|
+| `scope.py` | The trade study's scope as data: every arm, dataset, workload and metric, built or only proposed. `run.py status` prints it. |
+| `questions.py` | What is asked: the seeded points and the boxes, and `Case` (`workload:size:window`). |
+| `datasets/` | One module per product: `goes19.py`, `tempo_no2.py`. `base.py` is the interface; `latlon.py` helps with regular grids. |
+| `arms.py` | One class per access path: `UserStack`, `TunedH5py`, `Download`, `VirtualIcechunk`, `VirtualDmrpp`. |
+| `h5.py`, `stores.py` | Shared reading code: one HDF5 granule with h5py; object stores from a plain description. |
+| `trial.py` | One timed trial, and `Row`, the schema of `results.jsonl`. |
+| `counters.py`, `measure.py`, `probes.py`, `host.py` | What a row records besides time: requests, CPU and memory, the link's speed, the machine and the code. |
+| `gate.py` | The correctness gate. |
+| `session.py` | The plan (which trials, in what order) and the subprocess that runs each. |
+| `report.py`, `figures.py` | `results.jsonl` → `summary.json`, `summary.md`, `figures/`. |
+| `superchunks.py` | Arithmetic on chunk layouts; times nothing. |
+| `legacy.py` | Reads results written by the first benchmark. Temporary; see below. |
+| `run.py` | The command line. Parses arguments and writes files, nothing else. |
+| `paths.py` | Where manifests, gates, probes and results are filed. |
+
+Tests are in `tests/trade_study/`, one file per area, and never touch the
+network: they run every arm against synthetic TEMPO-shaped granules and a
+local virtual store (`tests/trade_study/fixtures.py`).
+
+### Adding a dataset
+
+1. Copy `datasets/goes19.py` (public data) or `datasets/tempo_no2.py`
+   (Earthdata login) and fill in each method `datasets/base.py` lists.
+2. Add the class to `DATASETS` in `datasets/__init__.py`.
+3. Set its status to `built` in `scope.py`. A test fails until steps 2 and
+   3 agree.
+4. `discover`, then `gate`. An arm's timings do not count until it passes.
+
+### Adding an arm
+
+1. Subclass `Arm` in `arms.py`: `open`, `read`, and `locate` if the library
+   can find chunks as a step of its own.
+2. Add the class to `ARM_CLASSES` at the bottom of `arms.py` and set the
+   arm's status in `scope.py`.
+3. Add its name to `ARMS` in `tests/trade_study/test_arms.py`, so the tests
+   check it returns the reference arm's values.
+
+### Changing what a row records
+
+Add the field to `Row` in `trial.py` and fill it in `run_trial`. If the
+report should show it, add it to `MEDIANS` in `report.py`. Rows written
+before the change still load: a missing field reads as null.
 
 ## Status against the scope
 
@@ -106,8 +167,8 @@ Scope rows this version does not reach:
 
 ## Definitions
 
-**A question** is asked in coordinates: the TEMPO benchmark's seeded points
-and boxes around 36.98° N, 95.97° W. Each dataset turns them into its own
+**A question** is asked in coordinates: seeded points and boxes around
+36.98° N, 95.97° W (`questions.py`). Each dataset turns them into its own
 grid indices (`datasets.py`), so two datasets answer the same question on
 the ground.
 
@@ -151,7 +212,7 @@ outside every other number.
 | Pinning: versions, store snapshot and granule list, in every row | `git_sha`, `uv_lock_sha256`, `packages`, `snapshot_id`, `manifest_path`. Manifests are committed. |
 | Correctness gate | `gate`: every arm against the first (tuned h5py) on the first, middle and last observation of each case. Equal fill masks, equal times, values within a relative 1e-6 (h5py decodes packed integers in float64, xarray in float32); `exact` and `close` are recorded apart. `session` refuses ungated arms. |
 | Floor: round-trip time and bandwidth first | `probe`; every row then carries `floor_seconds`. |
-| Fairness: authors review their arm; one factor at a time | Settings are the TEMPO benchmark's. **No arm here has been reviewed by its library's authors yet.** |
+| Fairness: authors review their arm; one factor at a time | Settings are listed under [Arm settings](#arm-settings). **No arm here has been reviewed by its library's authors yet.** |
 | Reproducibility: public GOES-19 cases without credentials | Below. |
 
 ## Reproduce (no credentials)
@@ -168,6 +229,10 @@ $run session     --dataset goes19 --window 1h --run-id <id> --yes
 $run report      results/trade_study/<id>
 $run superchunks --dataset goes19 --window 1h
 ```
+
+`report` writes `summary.json`, `summary.md` and `figures/` into the run's
+directory: one figure per case, each arm's end-to-end time split into
+setup and reading.
 
 `--window 1d` pins 144 granules; `1w` and `1m` are defined. One trial:
 `$run trial --dataset goes19 --arm tuned_h5py --case churro:10:1h --measure first_byte`.
@@ -187,6 +252,53 @@ $run gate --dataset tempo_no2 --window 1d --transport https --arms tuned_h5py,vi
 TEMPO granules are about 0.7 GB. `session --measures first_byte` and a
 short `--arms` list keep an out-of-region run from pulling many gigabytes
 through the distribution endpoint.
+
+## Arm settings
+
+| Arm | Defaults | Source | Tuning factors (`--settings`, `session --variants`) |
+|---|---|---|---|
+| `user_stack` | Whatever the libraries default to; fsspec's read-ahead cache fetches a block per HDF5 metadata read | The earthaccess documentation | none: it is deliberately untuned |
+| `tuned_h5py` | 8 MiB block reader; one process per granule, 8 at a time; 16 MiB page buffer on paged files only | The NSIDC cloud-optimized HDF5 study (Lopez, Barrett, Jelenak, Lee, 2025) | `block_size`, `max_workers`, `page_buf_size` |
+| `download` | One HEAD, then 16 MiB ranges with 16 in flight; granules one at a time | — | `part_bytes`, `concurrency` |
+| `virtual_icechunk`, `virtual_dmrpp` | zarr-python's and Icechunk's defaults | — | `zarr_concurrency` (outstanding chunk requests, default 10), `icechunk_concurrency`, `icechunk_decodes`, `zarrs_pipeline` (decode in Rust, in parallel) |
+
+A variant changes one factor at a time and is recorded in `arm_variant`;
+`arm_settings` holds every setting in force.
+
+## Statistics
+
+Per cell: n, median, min and max. Speedups are paired by session and
+repetition: a trial of one arm is compared with the other arm's trial from
+the same session and repetition, so both saw the same network and host. The
+95% interval is a t-interval on the log speedup from 10 pairs up, and a
+bootstrap on the median below that. When a run has several sessions, the
+spread between the sessions' median speedups is reported, and a speedup
+inside that spread is marked as not a detectable difference. Every arm is
+compared with `virtual_icechunk`, and every variant with its own arm's
+defaults.
+
+## What came from the first benchmark
+
+The first benchmark (`benchmarks/tempo_no2`, in this repository's history
+until the two were merged) read TEMPO NO₂ only. Its access code, request
+counters, floor model, gate and statistics are now this package's. Three
+things changed names on the way:
+
+| First benchmark | Here |
+|---|---|
+| arms `netcdf_user_stack`, `netcdf_tuned`, `netcdf_download` | `user_stack`, `tuned_h5py`, `download` |
+| workloads `scan`, `point`, `aoi` | `pancake`, `churro`, `box` |
+| phases `open`, `retrieval` | `manifest_seconds`, `byte_seconds` (and authentication and chunk identification timed apart) |
+
+Not carried over: the per-second host sampler and the "likely limiter"
+label; the pre-run estimate of hours and dollars; the `noop` and
+`virtual_manifeststore` checker arms; warm-process trials (every trial here
+times a warm second read instead).
+
+`report` still reads a `results.jsonl` the first benchmark wrote and
+upgrades its rows on load (`legacy.py`), because the only in-region
+measurements so far, the run the CODA talk quotes, are in that format.
+Delete `legacy.py` once that run has been repeated with this harness.
 
 ## First run: GOES-19 from a workstation (a method check, not a headline)
 
@@ -227,7 +339,7 @@ What the parts show that one end-to-end number does not:
   5.06 s): the arm is limited by bandwidth, not round trips. In region this
   should differ, which is why the concurrency pair is in the plan.
 - For the whole map of one observation the file readers win (1.65 s tuned,
-  1.69 s download, 2.19 s Icechunk), as in the TEMPO benchmark.
+  1.69 s download, 2.19 s Icechunk), as the first TEMPO benchmark found.
 - For every chunk of the hour (batch), all three non-default arms land
   within 7% of each other at about 10 s, about 1.5 times the floor.
 
@@ -336,7 +448,7 @@ bytes. The limits, which hold for any layout:
   exists and there is no credential-free bucket to write one to. Its
   manifest retrieval therefore has no network in it; rows say
   `index_location: local-disk`.
-- Request counts mean different things per arm, as in the TEMPO benchmark:
+- Request counts mean different things per arm (`counters.py`):
   byte ranges asked for (tuned h5py, download), completed S3 calls (user
   stack), and a static minimum from the chunk grid (Icechunk). Icechunk can
   split one chunk into several ranged reads, so its real count is higher.
@@ -345,4 +457,6 @@ bytes. The limits, which hold for any layout:
 - A batch reads every chunk of the benchmark variables for every granule in
   the window, not every byte of every file (only the download arm does
   that).
-- No host sampler or limiter labels (the TEMPO orchestrator has them).
+- No host sampler or limiter labels: the first benchmark sampled per-core CPU
+  once a second and labelled each cell's likely limiter; that was not carried
+  over.

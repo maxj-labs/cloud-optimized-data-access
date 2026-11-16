@@ -14,7 +14,6 @@ from pathlib import Path
 import h5py
 import icechunk
 import numpy as np
-import pandas as pd
 import xarray as xr
 from obspec_utils.registry import ObjectStoreRegistry
 from obstore.store import LocalStore
@@ -73,20 +72,22 @@ def make_granules(tmp_path: Path, n: int = 2, lat: int = 60, lon: int = 80, chun
     return paths
 
 
-def manifest_for(granules: list[Path]) -> pd.DataFrame:
-    return pd.DataFrame(
+def granule_records(granules: list[Path]) -> list[dict[str, str]]:
+    """The granules as a manifest lists them."""
+    return [
         {
-            "granule_ur": [p.stem for p in granules],
-            "source_url": [f"file://{p}" for p in granules],
-            "start_time": [str(FIRST_SCAN + np.timedelta64(i, "h")) + "Z" for i in range(len(granules))],
+            "granule_ur": path.stem,
+            "source_url": f"file://{path}",
+            "start_time": str(FIRST_SCAN + np.timedelta64(i, "h")) + "Z",
         }
-    )
+        for i, path in enumerate(granules)
+    ]
 
 
-def make_virtual_store(tmp_path: Path, granules: list[Path]) -> tuple[icechunk.Repository, str, str]:
+def make_virtual_store(tmp_path: Path, granules: list[Path]) -> tuple[icechunk.Repository, str]:
     """Virtual Icechunk store over ``granules``: flat layout, concatenated on time.
 
-    Returns (repo, snapshot_id, native_chunks_prefix).
+    Returns (repo, snapshot_id).
     """
     registry = ObjectStoreRegistry({"file://": LocalStore()})
     parts = []
@@ -110,4 +111,4 @@ def make_virtual_store(tmp_path: Path, granules: list[Path]) -> tuple[icechunk.R
     session = repo.writable_session("main")
     vds.vz.to_icechunk(session.store, validate_containers=False)
     snapshot = session.commit("fixture")
-    return repo, snapshot, f"file://{tmp_path / 'repo' / 'chunks'}"
+    return repo, snapshot

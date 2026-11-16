@@ -1,45 +1,48 @@
 # cloud-optimized-data-access
 
 Supporting materials for the Cloud Optimized Data Access Trade Study: the
-ODSI team's benchmarks and decks for the working
-group.
+ODSI team's benchmark and decks for the working group.
 
 ## What is here
 
 | Path | What |
 |---|---|
-| `benchmarks/tempo_no2/` | TEMPO NO₂ event access: file-based netCDF vs the same bytes through a virtual Zarr (Icechunk) store. Protocol in its README. |
-| `benchmarks/trade_study/` | Minimum viable harness for the trade study's full scope: any dataset and arm, time to first byte in parts, a correctness gate, superchunk bounds. Runs without credentials on public GOES-19. Status and protocol in its README. |
-| `results/trade_study/` | Its committed runs, probes, gate verdicts and superchunk tables. |
-| `results/tempo_no2/` | Committed results, one directory per run, with provenance. `latest.json` names the run the deck shows. |
-| `decks/coda-presentation/` | Slidev deck skeleton (placeholder title). Reads its numbers from `results/`. |
+| `benchmarks/trade_study/` | The benchmark harness: any dataset and arm, the same questions, time to first byte in parts, a correctness gate, paired speedups and figures. Its README has the status of every arm, the protocol, and a map of the code. |
+| `results/trade_study/` | Committed runs, probes, gate verdicts and superchunk tables. |
+| `decks/coda-presentation/` | The CODA talk of 3 November 2026, "One file is easy" (Slidev). |
+| `scripts/`, `results/dmrpp_staleness/` | A separate inventory of DMR++ sidecars older than their data files. |
+| `tests/` | Offline tests for all of the above. |
 
-## Reproduce
+## Try it
 
-Anyone with an Earthdata login on a machine in us-west-2 (the VEDA
-JupyterHub, CodeBuild, or an EC2 instance). Credentials come through
-earthaccess's normal strategies (environment, netrc, or prompt); the store
-mirror is anonymous; nothing is pasted anywhere.
+The GOES-19 dataset is public, so this needs no credentials and runs from
+anywhere:
 
 ```sh
 uv sync
-uv run python -m benchmarks.tempo_no2.run discover --window 1d   # writes the committed manifest (granules, snapshot, grid)
-uv run python -m benchmarks.tempo_no2.run probe                  # RTT, bandwidth, HDF5 paging → results/tempo_no2/probes.json
-uv run python -m benchmarks.tempo_no2.run gate                   # exact-equality gate; must print GATE PASSED
-uv run python -m benchmarks.tempo_no2.run smoke                  # CodeBuild or Hub; < 2 min; records/asserts request counts
-# gate, smoke and orchestrate time netcdf_tuned and virtual_icechunk by default;
-# add --arms netcdf_user_stack,netcdf_tuned,virtual_icechunk for the (slow) user stack
-uv run python -m benchmarks.tempo_no2.orchestrate --run-id <id> --headline-only --estimate   # trials, requests, hours, dollars
-uv run python -m benchmarks.tempo_no2.orchestrate --run-id <id> --session 1 --headline-only --yes   # EC2; reads probes.json
-uv run python -m benchmarks.tempo_no2.analyze results/tempo_no2/<id>
-cd decks/coda-presentation && npm install && npm run build
+run="uv run python -m benchmarks.trade_study.run"
+$run status                                      # what is built, what is only proposed
+$run discover    --dataset goes19 --window 1h    # pin the granules
+$run build-store --dataset goes19 --window 1h    # a local virtual store over them
+$run probe       --dataset goes19                # the link's round-trip time and bandwidth
+$run gate        --dataset goes19 --window 1h    # every arm must return the same values
+$run session     --dataset goes19 --window 1h --run-id <id> --yes
+$run report      results/trade_study/<id>        # summary.md, summary.json, figures/
 ```
 
-From a laptop, add `--access https`: the virtual chunks are read from
-NASA's distribution endpoint with your Earthdata token, and rows are
-labelled so they never mix with in-region numbers.
+TEMPO NO₂ needs an Earthdata login and either a machine in us-west-2 or
+`--transport https`; see `benchmarks/trade_study/README.md`. Credentials come
+through earthaccess's normal strategies (environment, netrc, or prompt);
+nothing is pasted anywhere. Headline timing runs on one dedicated EC2
+instance.
 
-Headline timing runs on one dedicated EC2 instance.
+## Develop
 
-The protocol, including assumptions and what would change the conclusion,
-is `benchmarks/tempo_no2/README.md`.
+```sh
+uv run pytest             # offline; about 20 seconds
+uvx ruff check            # lint
+uvx ruff format           # format
+cd decks/coda-presentation && npm ci && npm run build
+```
+
+CI runs the same four.
