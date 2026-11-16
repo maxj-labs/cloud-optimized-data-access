@@ -7,15 +7,19 @@ it) reads the wrong bytes. This study asks how often that has happened in
 NASA's cloud archives, and whether a sidecar that looks out of date is
 actually wrong.
 
-Results are in `results/dmrpp_staleness/`; start with its `summary.md`.
+Staleness is where it started, not all it checks: the verifier also compares
+how a sidecar describes each array (shape, data type, filters) with the file,
+and can compare the values Hyrax serves with a direct read.
+
+Results are in `results/dmrpp/`; start with `survey/summary.md`.
 
 ## The pipeline
 
 | Step | Command | What it does | Where it runs |
 |---|---|---|---|
-| 1. Survey | `python -m dmrpp.survey run`, then `report` | Samples 20 granules from every cloud-hosted HDF-family collection and compares each file's Last-Modified with its sidecar's. Finds collections where stale sidecars exist; it cannot say how many. | Anywhere, with `EARTHDATA_TOKEN` |
+| 1. Survey | `python -m dmrpp.survey run`, then `report` and `sample` | Samples 20 granules from every cloud-hosted HDF-family collection and compares each file's Last-Modified with its sidecar's. Finds collections where stale sidecars exist; it cannot say how many. `sample` then lists two granules per collection that has sidecars, flagged or not, for step 3. | Anywhere, with `EARTHDATA_TOKEN`; `report` and `sample` need no network |
 | 2. List | `python -m dmrpp.list_collection` | Lists a collection's whole S3 prefix and pairs every file with its sidecar: the complete list of stale files for that collection. Takes the survey's `collections.csv`. | us-west-2, with an Earthdata login |
-| 3. Verify | `python -m dmrpp.verify` | For a stale file from either step, reads the chunk index a second way, from the file itself, and compares it with the sidecar chunk by chunk. With `--values`, also compares what Hyrax serves with a direct read. | us-west-2 for `s3`; anywhere with `--transport https`, slower |
+| 3. Verify | `python -m dmrpp.verify` | For a file from either step, reads the chunk index a second way, from the file itself, and compares it with the sidecar chunk by chunk. With `--values`, also compares what Hyrax serves with a direct read. | us-west-2 for `s3`; anywhere with `--transport https`, slower |
 
 A timestamp says a file was written after its sidecar. Only step 3 says
 whether the sidecar is wrong: a bulk copy rewrites Last-Modified without
@@ -27,18 +31,27 @@ The dependencies are this repository's `dmrpp` extra:
 
 ```bash
 uv run --extra dmrpp python -m dmrpp.survey run --inventory cmr_cloud_inventory.csv
-uv run python -m dmrpp.survey report results/dmrpp_staleness
-uv run --extra dmrpp python -m dmrpp.list_collection --collections results/dmrpp_staleness/collections.csv --only-flagged --summary summary.csv --out stale.csv
-uv run --extra dmrpp python -m dmrpp.verify stale.csv --min-gap-days 1 --values --out verdicts.csv
+uv run python -m dmrpp.survey report        # collections.csv, stale_granules.csv, summary.md
+uv run python -m dmrpp.survey sample        # sampled_with_sidecars.csv
+uv run --extra dmrpp python -m dmrpp.list_collection --collections results/dmrpp/survey/collections.csv --only-flagged --summary summary.csv --out stale.csv
+uv run --extra dmrpp python -m dmrpp.verify stale.csv --min-gap-days 1 --values --out results/dmrpp/verify/stale.csv
+uv run --extra dmrpp python -m dmrpp.verify results/dmrpp/survey/sampled_with_sidecars.csv --provider POCLOUD --out results/dmrpp/verify/podaac.csv
 ```
 
 Each command's `--help` has its options, and for the verifier the meaning
-of every verdict. `report` needs no extra and no network: it rebuilds
-`collections.csv`, `stale_granules.csv` and `summary.md` from the committed
-`granules.jsonl.gz`.
+of every verdict. `report` and `sample` need no extra and no network: they
+rebuild their files from the committed `granules.jsonl.gz`, and a test
+fails when a committed file is not what they write today.
 
 `kerchunk` is pinned in the extra because `verify/hdf4.py` corrects that
 version's HDF4 decoder; move the pin and the corrections together.
+
+## Results
+
+| Path | What |
+|---|---|
+| `results/dmrpp/survey/` | The survey of 2026-11-13: `granules.jsonl.gz` (one row per sampled granule), and the three files `report` and the one file `sample` derive from it. It stopped at 3,941 of 5,617 collections; `run` resumes where it left off. |
+| `results/dmrpp/verify/` | The verifier's verdicts, one CSV per run. None are committed yet: the runs made so far used earlier versions of the verifier, whose false alarms were fixed afterwards, so they are to be repeated with this version first. |
 
 ## Map of the code
 

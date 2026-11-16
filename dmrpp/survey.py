@@ -23,7 +23,8 @@ Needs ``EARTHDATA_TOKEN`` in the environment. Requests are one-byte ranged
 GETs, at most ``--per-host`` in flight per DAAC host.
 
     EARTHDATA_TOKEN=... uv run --extra dmrpp python -m dmrpp.survey run --inventory cmr_cloud_inventory.csv
-    uv run python -m dmrpp.survey report results/dmrpp_staleness
+    uv run python -m dmrpp.survey report
+    uv run python -m dmrpp.survey sample
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ from urllib.parse import urljoin, urlparse
 
 from dmrpp.common import CMR, GAPS, is_data_file
 
+RESULTS = "results/dmrpp/survey"
 HDF_FAMILIES = ("netCDF", "HDF5", "HDF4")
 SAMPLE = (("oldest", "start_date", 7), ("newest", "-start_date", 7), ("revised", "-revision_date", 6))
 VERSION = re.compile(rb'dmrpp:version="([^"]+)"')
@@ -467,6 +469,48 @@ def report(args: argparse.Namespace) -> int:
     return 0
 
 
+SAMPLE_FIELDS = [
+    "provider", "short_name", "version", "concept_id", "granule_ur", "sample", "data_format", "data_newer_by_s",
+    "data_url", "dmrpp_url",
+]  # fmt: skip
+
+
+def with_sidecars(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The oldest and the newest sampled granule of every collection that has
+    sidecars, whether or not a timestamp flagged them: the verifier's input
+    for checking sidecars that look fine. A collection with neither an oldest
+    nor a newest granule with a sidecar gives its first granule that has one."""
+    by: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row.get("verdict") in ("fresh", "stale"):
+            by[row["concept_id"]].append(row)
+    chosen = []
+    for group in by.values():
+        ends = [
+            next(r for r in group if r["sample"] == kind)
+            for kind in ("oldest", "newest")
+            if any(r["sample"] == kind for r in group)
+        ]
+        chosen += ends or group[:1]
+    # The order is part of the file: the verifier picks and numbers granules in
+    # the order it reads them, and ``--start`` resumes a run by that number.
+    return sorted(chosen, key=lambda r: (r["provider"], r["short_name"], r["sample"]))
+
+
+def sample(args: argparse.Namespace) -> int:
+    out = Path(args.out)
+    chosen = with_sidecars(load_rows(out))
+    with (out / "sampled_with_sidecars.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=SAMPLE_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(chosen)
+    collections = len({row["concept_id"] for row in chosen})
+    print(
+        f"{len(chosen):,} granules from {collections:,} collections with sidecars in {out / 'sampled_with_sidecars.csv'}"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -476,7 +520,7 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="CSV of cloud collections with concept_id, provider, short_name, version, format_family, granules",
     )
-    s.add_argument("--out", default="results/dmrpp_staleness")
+    s.add_argument("--out", default=RESULTS)
     s.add_argument("--providers", nargs="*", help="only these CMR providers")
     s.add_argument("--limit", type=int, help="only the first N collections (after a seeded shuffle)")
     s.add_argument(
@@ -487,8 +531,14 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--collections-in-flight", type=int, default=24)
     s.set_defaults(fn=lambda a: asyncio.run(run(a)))
     s = sub.add_parser("report", help="collections.csv, stale_granules.csv and summary.md from granules.jsonl")
-    s.add_argument("out", nargs="?", default="results/dmrpp_staleness")
+    s.add_argument("out", nargs="?", default=RESULTS)
     s.set_defaults(fn=report)
+    s = sub.add_parser(
+        "sample",
+        help="sampled_with_sidecars.csv from granules.jsonl: two granules per collection with sidecars, for the verifier",
+    )
+    s.add_argument("out", nargs="?", default=RESULTS)
+    s.set_defaults(fn=sample)
     args = p.parse_args(argv)
     return args.fn(args)
 

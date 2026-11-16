@@ -11,7 +11,7 @@ DMR++ sidecars still describe their files, and decks for the working group.
 | `benchmarks/trade_study/` | The benchmark harness: any dataset and arm, the same questions, time to first byte in parts, a correctness gate, paired speedups and figures. Its README has the status of every arm, the protocol, and a map of the code. |
 | `results/trade_study/` | Committed runs, probes, gate verdicts and superchunk tables. |
 | `decks/coda-presentation/` | The CODA talk of 3 November 2026, "One file is easy" (Slidev). |
-| `dmrpp/`, `results/dmrpp_staleness/` | The DMR++ study: which sidecars are older than their data files, and whether they still describe them. Its README has the pipeline. Needs the `dmrpp` extra. |
+| `dmrpp/`, `results/dmrpp/` | The DMR++ study: which sidecars are older than their data files, and whether they still describe them. Its README has the pipeline. Needs the `dmrpp` extra. |
 | `tests/` | Offline tests for all of the above. |
 
 ## Try it
@@ -49,7 +49,7 @@ compares a sidecar with the file's own index chunk by chunk.
 The survey's report can be rebuilt offline from the committed data:
 
 ```sh
-uv run python -m dmrpp.survey report results/dmrpp_staleness
+uv run python -m dmrpp.survey report
 ```
 
 The other steps need the `dmrpp` extra and an Earthdata login, and the

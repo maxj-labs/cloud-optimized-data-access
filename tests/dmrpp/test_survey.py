@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from dmrpp import survey as stale
+
+SURVEY = Path(__file__).parents[2] / "results" / "dmrpp" / "survey"
 
 
 def _umm(*urls):
@@ -76,3 +82,36 @@ def test_summary_is_one_row_per_collection_with_stale_first():
         and by["C3"]["unreadable_statuses"] == "login-redirect"
     )
     assert by["C4"]["status"] == "all sampled sidecars fresh"
+
+
+def test_the_verifiers_sample_is_the_oldest_and_newest_granule_with_a_sidecar():
+    def row(concept_id, short_name, sample, verdict, granule):
+        return {"concept_id": concept_id, "short_name": short_name, "provider": "P", "version": "1", "sample": sample,
+                "verdict": verdict, "granule_ur": granule}  # fmt: skip
+
+    rows = [
+        row("C2", "b", "oldest", "fresh", "b-old-1"), row("C2", "b", "oldest", "fresh", "b-old-2"),
+        row("C2", "b", "newest", "stale", "b-new-1"), row("C2", "b", "revised", "fresh", "b-rev"),
+        row("C1", "a", "oldest", "no_dmrpp", "a-old"), row("C1", "a", "revised", "fresh", "a-rev"),  # only a revised one has a sidecar
+        row("C3", "c", "oldest", "no_dmrpp", "c-old"),  # no sidecars: left out
+    ]  # fmt: skip
+    assert [r["granule_ur"] for r in stale.with_sidecars(rows)] == ["a-rev", "b-new-1", "b-old-1"]
+
+
+@pytest.mark.parametrize("command", ["report", "sample"])
+def test_the_committed_survey_files_are_what_the_survey_writes_today(command, tmp_path, capsys):
+    """collections.csv, stale_granules.csv, summary.md and sampled_with_sidecars.csv
+    are derived from granules.jsonl.gz. If this fails, run ``python -m dmrpp.survey
+    report`` and ``sample`` and commit the result. The order of the sampled file
+    matters: the verifier numbers granules in the order it reads them."""
+    (tmp_path / "granules.jsonl.gz").write_bytes((SURVEY / "granules.jsonl.gz").read_bytes())
+    assert stale.main([command, str(tmp_path)]) == 0
+    written = sorted(path.name for path in tmp_path.iterdir() if path.name != "granules.jsonl.gz")
+    assert (
+        written
+        == {"report": ["collections.csv", "stale_granules.csv", "summary.md"], "sample": ["sampled_with_sidecars.csv"]}[
+            command
+        ]
+    )
+    for name in written:
+        assert (tmp_path / name).read_bytes() == (SURVEY / name).read_bytes(), name
