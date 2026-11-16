@@ -1,10 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "obstore==0.12.0",
-#     "earthaccess==0.19.0",
-# ]
-# ///
 """Proof of concept: find every data file newer than its DMR++ sidecar by listing S3.
 
 One S3 listing request returns up to 1,000 objects with their sizes and
@@ -15,9 +8,9 @@ with no sampling and no per-file requests.
 Run in us-west-2 with an Earthdata login (EARTHDATA_TOKEN, username and
 password, or netrc):
 
-    uv run list_dmrpp_staleness.py C2129195053-POCLOUD --out stale.csv
-    uv run list_dmrpp_staleness.py --prefix s3://podaac-ops-cumulus-protected/SOME_COLLECTION/ --provider POCLOUD
-    uv run list_dmrpp_staleness.py --collections collections.csv --only-flagged --summary summary.csv --out stale.csv
+    uv run --extra dmrpp python -m dmrpp.list_collection C2129195053-POCLOUD --out stale.csv
+    uv run --extra dmrpp python -m dmrpp.list_collection --prefix s3://podaac-ops-cumulus-protected/SOME_COLLECTION/ --provider POCLOUD
+    uv run --extra dmrpp python -m dmrpp.list_collection --collections collections.csv --only-flagged --summary summary.csv --out stale.csv
 
 Given a collection concept id, the script asks CMR for one granule, takes
 its ``s3://`` link, and lists that file's directory. Layouts differ by DAAC:
@@ -56,11 +49,8 @@ import urllib.request
 from collections import Counter
 from typing import Any
 
-CMR = "https://cmr.earthdata.nasa.gov/search/granules.umm_json"
-DATA_SUFFIXES = (".nc", ".nc4", ".h5", ".hdf", ".he5", ".hdf5")
-SIDECAR = ".dmrpp"
-GAPS = (("under 1 hour", 3600), ("under 1 day", 86400), ("under 30 days", 30 * 86400), ("under 1 year", 365 * 86400), ("1 year or more", float("inf")))
-
+from dmrpp.common import CMR, GAPS, ProviderCredentials, gap_label, is_data_file, s3_store
+from dmrpp.common import SIDECAR_SUFFIX as SIDECAR
 
 DATE_LIKE = re.compile(r"^(\d{1,4}([.\-_]?\d{1,3}){0,2}|[A-Za-z]?\d{3,8})$")
 
@@ -82,7 +72,7 @@ def prefix_from_cmr(concept_id: str, up: int) -> str:
     for item in items:
         for related in item["umm"].get("RelatedUrls", []):
             url = related.get("URL", "")
-            if url.startswith("s3://") and url.lower().endswith(DATA_SUFFIXES):
+            if url.startswith("s3://") and is_data_file(url):
                 return "/".join(climb(url.split("/")[:-1], up)) + "/"
     raise SystemExit(f"CMR lists no s3:// HDF or netCDF link for {concept_id}")
 
@@ -93,7 +83,7 @@ def pair(objects: list[dict[str, Any]], tolerance_s: float) -> dict[str, Any]:
     ``objects`` are listing entries with ``path``, ``last_modified`` and ``size``.
     """
     by_path = {o["path"]: o for o in objects}
-    data = [o for o in objects if o["path"].lower().endswith(DATA_SUFFIXES)]
+    data = [o for o in objects if is_data_file(o["path"])]
     stale, with_sidecar = [], 0
     for o in data:
         sidecar = by_path.get(o["path"] + SIDECAR)
@@ -102,12 +92,24 @@ def pair(objects: list[dict[str, Any]], tolerance_s: float) -> dict[str, Any]:
         with_sidecar += 1
         gap = (o["last_modified"] - sidecar["last_modified"]).total_seconds()
         if gap > tolerance_s:
-            stale.append({"path": o["path"], "data_last_modified": o["last_modified"].isoformat(), "dmrpp_last_modified": sidecar["last_modified"].isoformat(),
-                          "data_newer_by_s": gap, "data_size": o["size"], "dmrpp_size": sidecar["size"]})
+            stale.append(
+                {
+                    "path": o["path"],
+                    "data_last_modified": o["last_modified"].isoformat(),
+                    "dmrpp_last_modified": sidecar["last_modified"].isoformat(),
+                    "data_newer_by_s": gap,
+                    "data_size": o["size"],
+                    "dmrpp_size": sidecar["size"],
+                }
+            )
     sidecars = [p for p in by_path if p.endswith(SIDECAR)]
     return {
-        "objects": len(objects), "data_files": len(data), "with_sidecar": with_sidecar, "without_sidecar": len(data) - with_sidecar,
-        "orphan_sidecars": sum(p[: -len(SIDECAR)] not in by_path for p in sidecars), "stale": stale,
+        "objects": len(objects),
+        "data_files": len(data),
+        "with_sidecar": with_sidecar,
+        "without_sidecar": len(data) - with_sidecar,
+        "orphan_sidecars": sum(p[: -len(SIDECAR)] not in by_path for p in sidecars),
+        "stale": stale,
     }
 
 
@@ -130,21 +132,10 @@ class Stores:
 
     def __init__(self, region: str, anonymous: bool) -> None:
         self.region, self.anonymous = region, anonymous
-        self._credentials: dict[str, tuple[float, dict[str, str]]] = {}
+        self._credentials = ProviderCredentials()
 
     def get(self, bucket: str, provider: str) -> Any:
-        from obstore.store import S3Store
-
-        if self.anonymous:
-            return S3Store(bucket, region=self.region, skip_signature=True)
-        import earthaccess
-
-        fetched, c = self._credentials.get(provider, (0.0, {}))
-        if time.monotonic() - fetched > 45 * 60 or not c:
-            earthaccess.login()
-            c = earthaccess.get_s3_credentials(provider=provider)
-            self._credentials[provider] = (time.monotonic(), c)
-        return S3Store(bucket, region=self.region, access_key_id=c["accessKeyId"], secret_access_key=c["secretAccessKey"], token=c["sessionToken"])
+        return s3_store(bucket, self.region, None if self.anonymous else self._credentials.get(provider))
 
 
 def summary_row(result: dict[str, Any], requests: int, seconds: float, truncated: bool) -> dict[str, Any]:
@@ -152,16 +143,26 @@ def summary_row(result: dict[str, Any], requests: int, seconds: float, truncated
     gaps = [row["data_newer_by_s"] for row in stale]
     months = Counter(row["data_last_modified"][:7] for row in stale).most_common(1)
     return {
-        "objects": result["objects"], "data_files": result["data_files"], "with_sidecar": result["with_sidecar"],
-        "without_sidecar": result["without_sidecar"], "orphan_sidecars": result["orphan_sidecars"], "stale": len(stale),
-        "stale_over_1_day": sum(g >= 86400 for g in gaps), "stale_over_30_days": sum(g >= 30 * 86400 for g in gaps),
-        "max_gap_days": round(max(gaps, default=0) / 86400, 2), "busiest_month": months[0][0] if months else "",
+        "objects": result["objects"],
+        "data_files": result["data_files"],
+        "with_sidecar": result["with_sidecar"],
+        "without_sidecar": result["without_sidecar"],
+        "orphan_sidecars": result["orphan_sidecars"],
+        "stale": len(stale),
+        "stale_over_1_day": sum(g >= 86400 for g in gaps),
+        "stale_over_30_days": sum(g >= 30 * 86400 for g in gaps),
+        "max_gap_days": round(max(gaps, default=0) / 86400, 2),
+        "busiest_month": months[0][0] if months else "",
         "stale_in_other_months": len(stale) - (months[0][1] if months else 0),
-        "listing_requests": requests, "seconds": round(seconds, 1), "truncated": truncated,
+        "listing_requests": requests,
+        "seconds": round(seconds, 1),
+        "truncated": truncated,
     }
 
 
-def survey(stores: Stores, prefix: str, provider: str, args: argparse.Namespace) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
+def survey(
+    stores: Stores, prefix: str, provider: str, args: argparse.Namespace
+) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
     """List one prefix. Returns (summary row, stale files, bucket)."""
     parsed = urllib.parse.urlparse(prefix)
     bucket, key_prefix = parsed.netloc, parsed.path.lstrip("/")
@@ -173,14 +174,19 @@ def survey(stores: Stores, prefix: str, provider: str, args: argparse.Namespace)
 
 
 def describe(row: dict[str, Any], stale: list[dict[str, Any]], args: argparse.Namespace) -> None:
-    print(f"{row['objects']:,} objects in {row['listing_requests']:,} listing requests, {row['seconds']} s" + (f" (stopped at --max-objects {args.max_objects:,})" if row["truncated"] else ""))
-    print(f"{row['data_files']:,} data files: {row['with_sidecar']:,} with a sidecar, {row['without_sidecar']:,} without; {row['orphan_sidecars']:,} sidecars with no data file")
+    print(
+        f"{row['objects']:,} objects in {row['listing_requests']:,} listing requests, {row['seconds']} s"
+        + (f" (stopped at --max-objects {args.max_objects:,})" if row["truncated"] else "")
+    )
+    print(
+        f"{row['data_files']:,} data files: {row['with_sidecar']:,} with a sidecar, {row['without_sidecar']:,} without; {row['orphan_sidecars']:,} sidecars with no data file"
+    )
     print(f"{len(stale):,} data files newer than their sidecar by more than {args.tolerance_s:.0f} s")
     if stale:
         buckets: Counter[str] = Counter()
         for item in stale:
-            buckets[next(label for label, limit in GAPS if item["data_newer_by_s"] < limit)] += 1
-        for label, _ in GAPS:
+            buckets[gap_label(item["data_newer_by_s"])] += 1
+        for label, *_ in GAPS:
             if buckets[label]:
                 print(f"  {label}: {buckets[label]:,}")
         months = Counter(item["data_last_modified"][:7] for item in stale).most_common(5)
@@ -190,7 +196,13 @@ def describe(row: dict[str, Any], stale: list[dict[str, Any]], args: argparse.Na
 def targets(args: argparse.Namespace) -> list[dict[str, str]]:
     """The collections to list: from --collections (those with sidecars, flagged ones first), else the one given."""
     if not args.collections:
-        return [{"concept_id": args.concept_id or "", "short_name": "", "provider": args.provider or (args.concept_id or "").rpartition("-")[2]}]
+        return [
+            {
+                "concept_id": args.concept_id or "",
+                "short_name": "",
+                "provider": args.provider or (args.concept_id or "").rpartition("-")[2],
+            }
+        ]
     with open(args.collections, newline="") as f:
         rows = [r for r in csv.DictReader(f) if int(r.get("with_sidecar") or 0) > 0]
     if args.only_flagged:
@@ -201,9 +213,38 @@ def targets(args: argparse.Namespace) -> list[dict[str, str]]:
     return rows[: args.limit] if args.limit else rows
 
 
-STALE_FIELDS = ["concept_id", "short_name", "bucket", "path", "data_last_modified", "dmrpp_last_modified", "data_newer_by_s", "data_size", "dmrpp_size"]
-SUMMARY_FIELDS = ["concept_id", "short_name", "provider", "prefix", "error", "objects", "data_files", "with_sidecar", "without_sidecar", "orphan_sidecars",
-                  "stale", "stale_over_1_day", "stale_over_30_days", "max_gap_days", "busiest_month", "stale_in_other_months", "listing_requests", "seconds", "truncated"]
+STALE_FIELDS = [
+    "concept_id",
+    "short_name",
+    "bucket",
+    "path",
+    "data_last_modified",
+    "dmrpp_last_modified",
+    "data_newer_by_s",
+    "data_size",
+    "dmrpp_size",
+]
+SUMMARY_FIELDS = [
+    "concept_id",
+    "short_name",
+    "provider",
+    "prefix",
+    "error",
+    "objects",
+    "data_files",
+    "with_sidecar",
+    "without_sidecar",
+    "orphan_sidecars",
+    "stale",
+    "stale_over_1_day",
+    "stale_over_30_days",
+    "max_gap_days",
+    "busiest_month",
+    "stale_in_other_months",
+    "listing_requests",
+    "seconds",
+    "truncated",
+]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -211,12 +252,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("concept_id", nargs="?", help="a collection concept id, e.g. C2129195053-POCLOUD")
     p.add_argument("--prefix", help="list this s3://bucket/prefix/ instead of asking CMR")
     p.add_argument("--provider", help="CMR provider whose S3 credentials to fetch (default: the concept id's suffix)")
-    p.add_argument("--collections", help="the sampled inventory's collections.csv: list every collection in it that has sidecars")
-    p.add_argument("--only-flagged", action="store_true", help="with --collections: only collections the sampler found stale")
+    p.add_argument(
+        "--collections", help="the sampled inventory's collections.csv: list every collection in it that has sidecars"
+    )
+    p.add_argument(
+        "--only-flagged", action="store_true", help="with --collections: only collections the sampler found stale"
+    )
     p.add_argument("--providers", nargs="*", help="with --collections: only these providers")
     p.add_argument("--limit", type=int, help="with --collections: only the first N, largest sampled gap first")
-    p.add_argument("--up", type=int, default=0, help="climb this many more directories after date-like ones are dropped")
-    p.add_argument("--tolerance-s", type=float, default=60.0, help="a data file this much newer than its sidecar is stale")
+    p.add_argument(
+        "--up", type=int, default=0, help="climb this many more directories after date-like ones are dropped"
+    )
+    p.add_argument(
+        "--tolerance-s", type=float, default=60.0, help="a data file this much newer than its sidecar is stale"
+    )
     p.add_argument("--max-objects", type=int, default=200_000, help="stop listing a prefix after this many objects")
     p.add_argument("--region", default="us-west-2")
     p.add_argument("--anonymous", action="store_true", help="unsigned requests, for a public bucket")
@@ -239,7 +288,11 @@ def main(argv: list[str] | None = None) -> int:
             writer.writeheader()
     failed = 0
     for index, target in enumerate(todo, 1):
-        identity = {"concept_id": target["concept_id"], "short_name": target.get("short_name", ""), "provider": target["provider"]}
+        identity = {
+            "concept_id": target["concept_id"],
+            "short_name": target.get("short_name", ""),
+            "provider": target["provider"],
+        }
         if len(todo) > 1:
             print(f"\n[{index}/{len(todo)}] {identity['short_name'] or identity['concept_id']}")
         prefix = ""
@@ -257,8 +310,10 @@ def main(argv: list[str] | None = None) -> int:
             summary_writer.writerow({**identity, "prefix": prefix, **row})
             summary.flush()
         if stale_writer and out:
-            stale_writer.writerows({"concept_id": identity["concept_id"], "short_name": identity["short_name"], "bucket": bucket, **item}
-                                   for item in sorted(stale, key=lambda r: -r["data_newer_by_s"]))
+            stale_writer.writerows(
+                {"concept_id": identity["concept_id"], "short_name": identity["short_name"], "bucket": bucket, **item}
+                for item in sorted(stale, key=lambda r: -r["data_newer_by_s"])
+            )
             out.flush()
     for handle, name in ((out, args.out), (summary, args.summary)):
         if handle:

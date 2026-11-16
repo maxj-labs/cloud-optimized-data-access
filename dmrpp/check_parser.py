@@ -11,12 +11,17 @@
 # ///
 """Do values read through a DMR++ sidecar equal the file's own, with the fixed parser?
 
+Temporary, and the one file here that is run on its own (``uv run`` reads the
+dependencies above): it needs the fork's VirtualiZarr, which cannot share an
+environment with the release the rest of this repository is locked to. Delete
+it once the parser fixes are released.
+
 This checks the VirtualiZarr DMR++ parser (the ``fix/dmrpp-parser-sidecars``
 branch of maxj-labs/VirtualiZarr), not the sidecars and not Hyrax. For each
 granule it builds a virtual store from the sidecar, reads variables through
 it, and compares them with a direct h5py read of the same file.
 
-    uv run check_dmrpp_parser.py --provider POCLOUD s3://podaac-ops-cumulus-protected/ECCO_L4_OBP_LLC0090GRID_DAILY_V4R4B/OCEAN_BOTTOM_PRESSURE_day_mean_1997-06-12_ECCO_V4r4b_native_llc0090.nc
+    uv run dmrpp/check_parser.py --provider POCLOUD s3://podaac-ops-cumulus-protected/ECCO_L4_OBP_LLC0090GRID_DAILY_V4R4B/OCEAN_BOTTOM_PRESSURE_day_mean_1997-06-12_ECCO_V4r4b_native_llc0090.nc
 
 Run it in us-west-2: every chunk is one request, and through a DAAC's HTTPS
 endpoint each of those is a redirect and a signed URL. To keep it cheap in

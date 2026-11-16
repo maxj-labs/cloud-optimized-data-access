@@ -22,8 +22,8 @@ stale file. An exhaustive inventory needs S3 listings from inside us-west-2.
 Needs ``EARTHDATA_TOKEN`` in the environment. Requests are one-byte ranged
 GETs, at most ``--per-host`` in flight per DAAC host.
 
-    EARTHDATA_TOKEN=... python scripts/dmrpp_staleness.py run --inventory cmr_cloud_inventory.csv --out results/dmrpp_staleness
-    python scripts/dmrpp_staleness.py report results/dmrpp_staleness
+    EARTHDATA_TOKEN=... uv run --extra dmrpp python -m dmrpp.survey run --inventory cmr_cloud_inventory.csv
+    uv run python -m dmrpp.survey report results/dmrpp_staleness
 """
 
 from __future__ import annotations
@@ -43,17 +43,21 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
-CMR = "https://cmr.earthdata.nasa.gov/search/granules.umm_json"
+from dmrpp.common import CMR, GAPS, is_data_file
+
 HDF_FAMILIES = ("netCDF", "HDF5", "HDF4")
-DATA_SUFFIXES = (".nc", ".nc4", ".h5", ".hdf", ".he5", ".hdf5", ".h4", ".he4", ".nc3", ".HDF5", ".H5", ".HDF", ".NC", ".NC4")
 SAMPLE = (("oldest", "start_date", 7), ("newest", "-start_date", 7), ("revised", "-revision_date", 6))
 VERSION = re.compile(rb'dmrpp:version="([^"]+)"')
 SIDECAR_PREFIX_BYTES = 512  # enough for the XML declaration and the Dataset element's attributes
-MAGIC = {b"\x89HDF": "HDF5", b"CDF\x01": "netCDF classic", b"CDF\x02": "netCDF 64-bit offset", b"CDF\x05": "netCDF CDF-5", b"\x0e\x03\x13\x01": "HDF4"}
+MAGIC = {
+    b"\x89HDF": "HDF5",
+    b"CDF\x01": "netCDF classic",
+    b"CDF\x02": "netCDF 64-bit offset",
+    b"CDF\x05": "netCDF CDF-5",
+    b"\x0e\x03\x13\x01": "HDF4",
+}
 CREATED = re.compile(rb'name="created"[^>]*>\s*<Value>([^<]+)</Value>')
 SIDECAR_HEAD_BYTES = 512 * 2**10
-DAY = 86400
-GAPS = (("under 1 hour", 0, 3600), ("1 hour to 1 day", 3600, DAY), ("1 to 30 days", DAY, 30 * DAY), ("30 days to 1 year", 30 * DAY, 365 * DAY), ("over 1 year", 365 * DAY, float("inf")))
 USER_AGENT = "dmrpp-staleness-inventory/0.1"
 
 
@@ -66,7 +70,7 @@ def data_and_sidecar(umm: dict[str, Any]) -> tuple[str | None, str | None, bool]
             continue
         if url.endswith(".dmrpp"):
             sidecar = sidecar or url
-        elif related.get("Type") == "GET DATA" and url.endswith(DATA_SUFFIXES):
+        elif related.get("Type") == "GET DATA" and is_data_file(url):
             data = data or url
     if data is None:
         return None, None, False
@@ -88,7 +92,9 @@ def classify(data: dict[str, Any], sidecar: dict[str, Any], tolerance_s: float) 
         return "no_dmrpp", None
     if data.get("last_modified") is None or sidecar.get("last_modified") is None:
         return "unreadable", None
-    delta = (datetime.fromisoformat(data["last_modified"]) - datetime.fromisoformat(sidecar["last_modified"])).total_seconds()
+    delta = (
+        datetime.fromisoformat(data["last_modified"]) - datetime.fromisoformat(sidecar["last_modified"])
+    ).total_seconds()
     return ("stale" if delta > tolerance_s else "fresh"), delta
 
 
@@ -137,7 +143,9 @@ class Prober:
                             out["status"] = response.status
                             if response.status in (200, 206):
                                 modified = response.headers.get("Last-Modified")
-                                out["last_modified"] = parsedate_to_datetime(modified).astimezone(UTC).isoformat() if modified else None
+                                out["last_modified"] = (
+                                    parsedate_to_datetime(modified).astimezone(UTC).isoformat() if modified else None
+                                )
                                 total = response.headers.get("Content-Range", "").rpartition("/")[2]
                                 out["size"] = int(total) if total.isdigit() else None
                                 out["body"] = await response.read() if nbytes > 1 else b""
@@ -149,28 +157,50 @@ class Prober:
                     await asyncio.sleep(2**attempt)
         return out
 
-    async def granule(self, collection: dict[str, str], item: dict[str, Any], kind: str, tolerance_s: float) -> dict[str, Any]:
+    async def granule(
+        self, collection: dict[str, str], item: dict[str, Any], kind: str, tolerance_s: float
+    ) -> dict[str, Any]:
         umm, meta = item["umm"], item["meta"]
         data_url, sidecar_url, advertised = data_and_sidecar(umm)
         row: dict[str, Any] = {
-            "concept_id": collection["concept_id"], "short_name": collection["short_name"], "version": collection["version"],
-            "provider": collection["provider"], "granule_ur": umm.get("GranuleUR"), "granule_concept_id": meta.get("concept-id"),
-            "sample": kind, "cmr_revision_id": meta.get("revision-id"), "cmr_revision_date": meta.get("revision-date"),
-            "data_url": data_url, "dmrpp_url": sidecar_url, "dmrpp_advertised_in_cmr": advertised,
+            "concept_id": collection["concept_id"],
+            "short_name": collection["short_name"],
+            "version": collection["version"],
+            "provider": collection["provider"],
+            "granule_ur": umm.get("GranuleUR"),
+            "granule_concept_id": meta.get("concept-id"),
+            "sample": kind,
+            "cmr_revision_id": meta.get("revision-id"),
+            "cmr_revision_date": meta.get("revision-date"),
+            "data_url": data_url,
+            "dmrpp_url": sidecar_url,
+            "dmrpp_advertised_in_cmr": advertised,
         }
         if data_url is None:
             return {**row, "verdict": "no_https_hdf_link"}
         sidecar = await self.stat(sidecar_url, SIDECAR_PREFIX_BYTES)
-        row.update(dmrpp_status=sidecar["status"], dmrpp_last_modified=sidecar["last_modified"], dmrpp_size=sidecar["size"])
+        row.update(
+            dmrpp_status=sidecar["status"], dmrpp_last_modified=sidecar["last_modified"], dmrpp_size=sidecar["size"]
+        )
         if sidecar["status"] not in (200, 206):
             return {**row, "verdict": "no_dmrpp" if sidecar["status"] == 404 else "unreadable"}
         if not is_sidecar(sidecar["body"]):
             # some endpoints answer a missing object with 200 and an HTML "not found" page
-            return {**row, "verdict": "no_dmrpp", "dmrpp_status": f"{sidecar['status']}, not a DMR++ document", "dmrpp_last_modified": None}
+            return {
+                **row,
+                "verdict": "no_dmrpp",
+                "dmrpp_status": f"{sidecar['status']}, not a DMR++ document",
+                "dmrpp_last_modified": None,
+            }
         version = VERSION.search(sidecar["body"])
         row["dmrpp_version"] = version.group(1).decode() if version else None
         data = await self.stat(data_url, 8)
-        row.update(data_status=data["status"], data_last_modified=data["last_modified"], data_size=data["size"], data_format=file_format(data["body"]))
+        row.update(
+            data_status=data["status"],
+            data_last_modified=data["last_modified"],
+            data_size=data["size"],
+            data_format=file_format(data["body"]),
+        )
         if data["status"] in (200, 206) and row["data_format"] is None:
             return {**row, "verdict": "unreadable", "data_status": f"{data['status']}, not an HDF or netCDF file"}
         row["verdict"], row["data_newer_by_s"] = classify(data, sidecar, tolerance_s)
@@ -186,8 +216,15 @@ class Prober:
             for item in await self.cmr(collection["concept_id"], sort_key, n):
                 items.setdefault(item["meta"]["concept-id"], (item, kind))
         if not items:
-            return [{"concept_id": collection["concept_id"], "short_name": collection["short_name"], "version": collection["version"],
-                     "provider": collection["provider"], "verdict": "no_granules_from_cmr"}]
+            return [
+                {
+                    "concept_id": collection["concept_id"],
+                    "short_name": collection["short_name"],
+                    "version": collection["version"],
+                    "provider": collection["provider"],
+                    "verdict": "no_granules_from_cmr",
+                }
+            ]
         ordered = list(items.values())
         # one granule first: a collection with no sidecar there is not worth twenty requests
         first = await self.granule(collection, *ordered[0], tolerance_s)
@@ -196,13 +233,19 @@ class Prober:
             if second["verdict"] in ("no_dmrpp", "no_https_hdf_link"):
                 return [first, second] if second is not first else [first]
             rest = ordered[1:-1]
-            return [first, second, *await asyncio.gather(*(self.granule(collection, i, k, tolerance_s) for i, k in rest))]
+            return [
+                first,
+                second,
+                *await asyncio.gather(*(self.granule(collection, i, k, tolerance_s) for i, k in rest)),
+            ]
         return [first, *await asyncio.gather(*(self.granule(collection, i, k, tolerance_s) for i, k in ordered[1:]))]
 
 
 def candidates(inventory: Path, providers: set[str] | None) -> list[dict[str, str]]:
     with inventory.open() as f:
-        rows = [r for r in csv.DictReader(f) if r["format_family"] in HDF_FAMILIES and int(float(r["granules"] or 0)) > 0]
+        rows = [
+            r for r in csv.DictReader(f) if r["format_family"] in HDF_FAMILIES and int(float(r["granules"] or 0)) > 0
+        ]
     return [r for r in rows if providers is None or r["provider"] in providers]
 
 
@@ -216,8 +259,14 @@ async def run(args: argparse.Namespace) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     rows_path = out / "granules.jsonl"
-    done = {json.loads(line)["concept_id"] for line in rows_path.read_text().splitlines()} if rows_path.exists() else set()
-    todo = [c for c in candidates(Path(args.inventory), set(args.providers) if args.providers else None) if c["concept_id"] not in done]
+    done = (
+        {json.loads(line)["concept_id"] for line in rows_path.read_text().splitlines()} if rows_path.exists() else set()
+    )
+    todo = [
+        c
+        for c in candidates(Path(args.inventory), set(args.providers) if args.providers else None)
+        if c["concept_id"] not in done
+    ]
     random.Random(0).shuffle(todo)  # spread the load across DAACs from the start
     if args.limit:
         todo = todo[: args.limit]
@@ -235,8 +284,15 @@ async def run(args: argparse.Namespace) -> int:
                 try:
                     rows = await prober.collection(collection, args.tolerance_s)
                 except Exception as error:  # noqa: BLE001 -- one collection's failure must not end the inventory
-                    rows = [{"concept_id": collection["concept_id"], "short_name": collection["short_name"], "version": collection["version"],
-                             "provider": collection["provider"], "verdict": f"error: {type(error).__name__}: {error}"[:300]}]
+                    rows = [
+                        {
+                            "concept_id": collection["concept_id"],
+                            "short_name": collection["short_name"],
+                            "version": collection["version"],
+                            "provider": collection["provider"],
+                            "verdict": f"error: {type(error).__name__}: {error}"[:300],
+                        }
+                    ]
             with rows_path.open("a") as f:
                 f.writelines(json.dumps(r) + "\n" for r in rows)
             finished += 1
@@ -266,15 +322,33 @@ def summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             status = "no sidecars"
         else:
             status = next(iter(verdicts))
-        out.append({
-            "concept_id": concept_id, "short_name": group[0]["short_name"], "version": group[0]["version"], "provider": group[0]["provider"],
-            "status": status, "sampled": len(group), "with_sidecar": with_sidecar, "stale": len(stale), "fresh": verdicts["fresh"],
-            "no_dmrpp": verdicts["no_dmrpp"], "unreadable": verdicts["unreadable"],
-            "max_data_newer_by_days": round(max((r["data_newer_by_s"] for r in stale), default=0) / 86400, 2),
-            "advertised_in_cmr": sum(bool(r.get("dmrpp_advertised_in_cmr")) for r in group),
-            "unreadable_statuses": ", ".join(sorted({str(r.get("data_status") or r.get("dmrpp_status")) for r in group if r["verdict"] == "unreadable"})),
-            "dmrpp_versions": ", ".join(sorted({r["dmrpp_version"] for r in group if r.get("dmrpp_version")})),
-        })
+        out.append(
+            {
+                "concept_id": concept_id,
+                "short_name": group[0]["short_name"],
+                "version": group[0]["version"],
+                "provider": group[0]["provider"],
+                "status": status,
+                "sampled": len(group),
+                "with_sidecar": with_sidecar,
+                "stale": len(stale),
+                "fresh": verdicts["fresh"],
+                "no_dmrpp": verdicts["no_dmrpp"],
+                "unreadable": verdicts["unreadable"],
+                "max_data_newer_by_days": round(max((r["data_newer_by_s"] for r in stale), default=0) / 86400, 2),
+                "advertised_in_cmr": sum(bool(r.get("dmrpp_advertised_in_cmr")) for r in group),
+                "unreadable_statuses": ", ".join(
+                    sorted(
+                        {
+                            str(r.get("data_status") or r.get("dmrpp_status"))
+                            for r in group
+                            if r["verdict"] == "unreadable"
+                        }
+                    )
+                ),
+                "dmrpp_versions": ", ".join(sorted({r["dmrpp_version"] for r in group if r.get("dmrpp_version")})),
+            }
+        )
     return sorted(out, key=lambda r: (-r["stale"], r["provider"], r["short_name"]))
 
 
@@ -301,36 +375,93 @@ def report(args: argparse.Namespace) -> int:
         writer.writerows(collections)
     stale_rows = [r for r in rows if r["verdict"] == "stale"]
     with (out / "stale_granules.csv").open("w", newline="") as f:
-        fields = ["provider", "short_name", "version", "concept_id", "granule_ur", "sample", "data_last_modified", "dmrpp_last_modified",
-                  "dmrpp_created", "dmrpp_version", "data_newer_by_s", "data_size", "cmr_revision_id", "cmr_revision_date", "data_url", "dmrpp_url"]
+        fields = [
+            "provider",
+            "short_name",
+            "version",
+            "concept_id",
+            "granule_ur",
+            "sample",
+            "data_last_modified",
+            "dmrpp_last_modified",
+            "dmrpp_created",
+            "dmrpp_version",
+            "data_newer_by_s",
+            "data_size",
+            "cmr_revision_id",
+            "cmr_revision_date",
+            "data_url",
+            "dmrpp_url",
+        ]
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(sorted(stale_rows, key=lambda r: (r["provider"], r["short_name"], r["granule_ur"] or "")))
     statuses = Counter(c["status"] for c in collections)
-    lines = ["# DMR++ staleness: sampled inventory", "",
-             f"{len(collections):,} collections sampled, {len(rows):,} granules checked.", "",
-             "| Collections | Count |", "|---|---:|"] + [f"| {k} | {v:,} |" for k, v in statuses.most_common()]
-    lines += ["", "## By provider", "", "| Provider | Sampled | With sidecars | With stale sidecars | No sidecars | Could not read |", "|---|---:|---:|---:|---:|---:|"]
+    lines = [
+        "# DMR++ staleness: sampled inventory",
+        "",
+        f"{len(collections):,} collections sampled, {len(rows):,} granules checked.",
+        "",
+        "| Collections | Count |",
+        "|---|---:|",
+    ] + [f"| {k} | {v:,} |" for k, v in statuses.most_common()]
+    lines += [
+        "",
+        "## By provider",
+        "",
+        "| Provider | Sampled | With sidecars | With stale sidecars | No sidecars | Could not read |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
     for provider in sorted({c["provider"] for c in collections}):
         mine = [c for c in collections if c["provider"] == provider]
-        lines.append(f"| {provider} | {len(mine):,} | {sum(c['with_sidecar'] > 0 for c in mine):,} | {sum(c['stale'] > 0 for c in mine):,} | "
-                     f"{sum(c['status'] == 'no sidecars' for c in mine):,} | {sum(c['status'] == 'could not read' for c in mine):,} |")
-    lines += ["", "## Stale granules by how much newer the data file is", "", "| Gap | Granules | Collections |", "|---|---:|---:|"]
+        lines.append(
+            f"| {provider} | {len(mine):,} | {sum(c['with_sidecar'] > 0 for c in mine):,} | {sum(c['stale'] > 0 for c in mine):,} | "
+            f"{sum(c['status'] == 'no sidecars' for c in mine):,} | {sum(c['status'] == 'could not read' for c in mine):,} |"
+        )
+    lines += [
+        "",
+        "## Stale granules by how much newer the data file is",
+        "",
+        "| Gap | Granules | Collections |",
+        "|---|---:|---:|",
+    ]
     for label, low, high in GAPS:
         hits = [r for r in stale_rows if low <= r["data_newer_by_s"] < high]
         lines.append(f"| {label} | {len(hits):,} | {len({r['concept_id'] for r in hits}):,} |")
-    lines += ["", "## Stale granules by the month the data file was last modified", "", "| Month | Granules | Providers |", "|---|---:|---|"]
+    lines += [
+        "",
+        "## Stale granules by the month the data file was last modified",
+        "",
+        "| Month | Granules | Providers |",
+        "|---|---:|---|",
+    ]
     months = Counter(r["data_last_modified"][:7] for r in stale_rows)
     for month, n in months.most_common(10):
-        lines.append(f"| {month} | {n:,} | {', '.join(sorted({r['provider'] for r in stale_rows if r['data_last_modified'][:7] == month}))} |")
+        lines.append(
+            f"| {month} | {n:,} | {', '.join(sorted({r['provider'] for r in stale_rows if r['data_last_modified'][:7] == month}))} |"
+        )
     confirmed = sum(bool(r.get("dmrpp_created")) for r in stale_rows)
-    built = (f"{confirmed:,} of {len(stale_rows):,} stale sidecars carry a `build_dmrpp_metadata/created` time; the rest predate that attribute, "
-             "so their build time is the sidecar object's own Last-Modified.")
-    caveat = ("A stale verdict means the data object was written to S3 after its sidecar. It does not show that the bytes changed: "
-              "a bulk copy within a bucket rewrites Last-Modified without touching content.")
+    built = (
+        f"{confirmed:,} of {len(stale_rows):,} stale sidecars carry a `build_dmrpp_metadata/created` time; the rest predate that attribute, "
+        "so their build time is the sidecar object's own Last-Modified."
+    )
+    caveat = (
+        "A stale verdict means the data object was written to S3 after its sidecar. It does not show that the bytes changed: "
+        "a bulk copy within a bucket rewrites Last-Modified without touching content."
+    )
     lines += ["", built, "", caveat]
-    lines += ["", "## Collections with stale sidecars", "", "| Provider | Collection | Version | Stale / with sidecar | Data newer by, at most (days) |", "|---|---|---|---:|---:|"]
-    lines += [f"| {c['provider']} | {c['short_name']} | {c['version']} | {c['stale']} / {c['with_sidecar']} | {c['max_data_newer_by_days']} |" for c in collections if c["stale"]]
+    lines += [
+        "",
+        "## Collections with stale sidecars",
+        "",
+        "| Provider | Collection | Version | Stale / with sidecar | Data newer by, at most (days) |",
+        "|---|---|---|---:|---:|",
+    ]
+    lines += [
+        f"| {c['provider']} | {c['short_name']} | {c['version']} | {c['stale']} / {c['with_sidecar']} | {c['max_data_newer_by_days']} |"
+        for c in collections
+        if c["stale"]
+    ]
     (out / "summary.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
     return 0
@@ -340,11 +471,17 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("run", help="sample collections and write granules.jsonl (network; resumable)")
-    s.add_argument("--inventory", required=True, help="CSV of cloud collections with concept_id, provider, short_name, version, format_family, granules")
+    s.add_argument(
+        "--inventory",
+        required=True,
+        help="CSV of cloud collections with concept_id, provider, short_name, version, format_family, granules",
+    )
     s.add_argument("--out", default="results/dmrpp_staleness")
     s.add_argument("--providers", nargs="*", help="only these CMR providers")
     s.add_argument("--limit", type=int, help="only the first N collections (after a seeded shuffle)")
-    s.add_argument("--tolerance-s", type=float, default=60.0, help="a data file this much newer than its sidecar is stale")
+    s.add_argument(
+        "--tolerance-s", type=float, default=60.0, help="a data file this much newer than its sidecar is stale"
+    )
     s.add_argument("--per-host", type=int, default=4, help="requests in flight per DAAC host")
     s.add_argument("--concurrency", type=int, default=32, help="connections in total")
     s.add_argument("--collections-in-flight", type=int, default=24)

@@ -10,7 +10,7 @@ ODSI team's benchmark and decks for the working group.
 | `benchmarks/trade_study/` | The benchmark harness: any dataset and arm, the same questions, time to first byte in parts, a correctness gate, paired speedups and figures. Its README has the status of every arm, the protocol, and a map of the code. |
 | `results/trade_study/` | Committed runs, probes, gate verdicts and superchunk tables. |
 | `decks/coda-presentation/` | The CODA talk of 3 November 2026, "One file is easy" (Slidev). |
-| `scripts/`, `results/dmrpp_staleness/` | A separate inventory of DMR++ sidecars older than their data files. |
+| `dmrpp/`, `results/dmrpp_staleness/` | The DMR++ study: which sidecars are older than their data files, and whether they still describe them. Its README has the pipeline. Needs the `dmrpp` extra. |
 | `tests/` | Offline tests for all of the above. |
 
 ## Try it

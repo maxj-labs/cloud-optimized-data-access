@@ -26,14 +26,24 @@ dependencies = [
     "zarrs>=0.2.3",
 ]
 
+[project.optional-dependencies]
+# The DMR++ study (dmrpp/): `uv run --extra dmrpp python -m dmrpp.verify ...`.
+# kerchunk is pinned because dmrpp/verify/hdf4.py corrects that version's HDF4 decoder.
+dmrpp = [
+    "aiohttp",
+    "fsspec",
+    "kerchunk==0.2.10",
+    "virtualizarr[hdf4]",
+]
+
 [dependency-groups]
 dev = ["pytest"]
 
 [tool.ruff]
 line-length = 120
 target-version = "py312"
-# The DMR++ staleness scripts are a separate piece of work and are not linted or formatted yet.
-extend-exclude = ["dmrpp", "tests/dmrpp"]
+# The parser check is a standalone uv script against a fork of VirtualiZarr; it is temporary and left as written.
+extend-exclude = ["dmrpp/check_parser.py"]
 
 [tool.ruff.lint]
 # pyflakes and pycodestyle, import order, likely bugs, outdated syntax, blanket excepts
@@ -42,6 +52,9 @@ select = ["E", "F", "I", "B", "UP", "BLE"]
 [tool.ruff.lint.per-file-ignores]
 # the scope is a table of prose: one row per line reads better than wrapped strings
 "benchmarks/trade_study/scope.py" = ["E501"]
+# report lines, usage examples and XML fixtures that read worse wrapped
+"dmrpp/**" = ["E501"]
+"tests/dmrpp/**" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
