@@ -12,6 +12,7 @@ DMR++ sidecars still describe their files, and decks for the working group.
 | `results/trade_study/` | Committed runs, probes, gate verdicts and superchunk tables. |
 | `decks/coda-presentation/` | The CODA talk of 3 November 2026, "One file is easy" (Slidev). |
 | `dmrpp/`, `results/dmrpp/` | The DMR++ study: which sidecars are older than their data files, and whether they still describe them. Its README has the pipeline. Needs the `dmrpp` extra. |
+| `benchmarks/cost/data/`, `scripts/cmr_cloud_inventory.py` | An inventory of every cloud-hosted CMR collection, and the script that rebuilds it from CMR metadata. The DMR++ survey samples from it. |
 | `tests/` | Offline tests for all of the above. |
 
 ## Try it

@@ -9,6 +9,7 @@ import pytest
 from dmrpp import survey as stale
 
 SURVEY = Path(__file__).parents[2] / "results" / "dmrpp" / "survey"
+INVENTORY = Path(__file__).parents[2] / "benchmarks" / "cost" / "data" / "cmr_cloud_inventory.csv"
 
 
 def _umm(*urls):
@@ -115,3 +116,16 @@ def test_the_committed_survey_files_are_what_the_survey_writes_today(command, tm
     )
     for name in written:
         assert (tmp_path / name).read_bytes() == (SURVEY / name).read_bytes(), name
+
+
+def test_the_committed_inventory_is_the_one_the_survey_sampled_from():
+    """The survey can only be resumed from this branch if its input is here."""
+    import csv
+
+    todo = stale.candidates(INVENTORY, None)
+    assert len(todo) == 5617 and {"concept_id", "provider", "short_name", "version"} <= set(todo[0])
+    in_inventory = {row["concept_id"] for row in todo}
+    with (SURVEY / "collections.csv").open() as f:
+        surveyed = {row["concept_id"] for row in csv.DictReader(f)}
+    assert len(surveyed) == 3941 and surveyed <= in_inventory
+    assert len(stale.candidates(INVENTORY, {"POCLOUD"})) < len(todo)

@@ -22,7 +22,7 @@ stale file. An exhaustive inventory needs S3 listings from inside us-west-2.
 Needs ``EARTHDATA_TOKEN`` in the environment. Requests are one-byte ranged
 GETs, at most ``--per-host`` in flight per DAAC host.
 
-    EARTHDATA_TOKEN=... uv run --extra dmrpp python -m dmrpp.survey run --inventory cmr_cloud_inventory.csv
+    EARTHDATA_TOKEN=... uv run --extra dmrpp python -m dmrpp.survey run --inventory benchmarks/cost/data/cmr_cloud_inventory.csv
     uv run python -m dmrpp.survey report
     uv run python -m dmrpp.survey sample
 """

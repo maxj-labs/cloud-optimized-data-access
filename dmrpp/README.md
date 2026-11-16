@@ -17,7 +17,7 @@ Results are in `results/dmrpp/`; start with `survey/summary.md`.
 
 | Step | Command | What it does | Where it runs |
 |---|---|---|---|
-| 1. Survey | `python -m dmrpp.survey run`, then `report` and `sample` | Samples 20 granules from every cloud-hosted HDF-family collection and compares each file's Last-Modified with its sidecar's. Finds collections where stale sidecars exist; it cannot say how many. `sample` then lists two granules per collection that has sidecars, flagged or not, for step 3. | Anywhere, with `EARTHDATA_TOKEN`; `report` and `sample` need no network |
+| 1. Survey | `python -m dmrpp.survey run`, then `report` and `sample` | Samples 20 granules from every cloud-hosted HDF-family collection in the inventory (`benchmarks/cost/data/`) and compares each file's Last-Modified with its sidecar's. Finds collections where stale sidecars exist; it cannot say how many. `sample` then lists two granules per collection that has sidecars, flagged or not, for step 3. | Anywhere, with `EARTHDATA_TOKEN`; `report` and `sample` need no network |
 | 2. List | `python -m dmrpp.list_collection` | Lists a collection's whole S3 prefix and pairs every file with its sidecar: the complete list of stale files for that collection. Takes the survey's `collections.csv`. | us-west-2, with an Earthdata login |
 | 3. Verify | `python -m dmrpp.verify` | For a file from either step, reads the chunk index a second way, from the file itself, and compares it with the sidecar chunk by chunk. With `--values`, also compares what Hyrax serves with a direct read. | us-west-2 for `s3`; anywhere with `--transport https`, slower |
 
@@ -30,7 +30,7 @@ changing a byte.
 The dependencies are this repository's `dmrpp` extra:
 
 ```bash
-uv run --extra dmrpp python -m dmrpp.survey run --inventory cmr_cloud_inventory.csv
+uv run --extra dmrpp python -m dmrpp.survey run --inventory benchmarks/cost/data/cmr_cloud_inventory.csv
 uv run python -m dmrpp.survey report        # collections.csv, stale_granules.csv, summary.md
 uv run python -m dmrpp.survey sample        # sampled_with_sidecars.csv
 uv run --extra dmrpp python -m dmrpp.list_collection --collections results/dmrpp/survey/collections.csv --only-flagged --summary summary.csv --out stale.csv
