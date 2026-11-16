@@ -24,7 +24,8 @@ import matplotlib.ticker
 from matplotlib.patches import Patch
 
 OUT = Path(__file__).resolve().parents[1] / "public" / "figures" / "external"
-# The deck's colours: Icechunk / virtual Zarr magenta, every other library coral (as in analyze.py)
+# The deck's colours: Icechunk / virtual Zarr magenta, every other library coral. Keep these and the
+# style below the same as benchmarks/trade_study/figures.py, which draws the deck's benchmark figures.
 VIRTUAL, OTHER, INK, MUTED = "#952f7c", "#d97e6a", "#3f3f48", "#6b6b76"
 HATCH = {"hatch.color": "white", "hatch.linewidth": 1.5}
 STYLE = {"font.family": ["Inter", "DejaVu Sans", "sans-serif"], "font.size": 13, "svg.fonttype": "none"}

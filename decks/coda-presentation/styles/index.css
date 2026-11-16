@@ -84,7 +84,7 @@
   margin-bottom: 0.4rem;
 }
 
-/* Cards and stat tiles, after zarr.dev's adopter cards. */
+/* Cards, after zarr.dev's adopter cards. */
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
@@ -111,33 +111,6 @@
   overflow-wrap: anywhere;
 }
 
-.stat b {
-  font-family: var(--vz-mono);
-  font-size: 2.4rem;
-  font-weight: 400;
-  line-height: 1.05;
-  letter-spacing: -0.02em;
-  color: var(--vz-primary-dark);
-}
-
-.stat b small {
-  font-size: 1rem;
-}
-
-.stat em {
-  display: block;
-  margin-top: 0.4rem;
-  font-style: normal;
-  font-size: 0.8rem;
-  color: var(--vz-muted);
-}
-
-.todo {
-  color: var(--slidev-theme-primary);
-  font-family: var(--vz-mono);
-  font-size: 0.75rem;
-}
-
 /* Figures stay inside the slide. Slidev scales a fixed 980 by 552 px
    slide to the window, so limits are in slide pixels, never vh. */
 .slidev-layout img.figure {
@@ -147,15 +120,6 @@
   height: auto;
   margin: 0.5rem auto 0;
   display: block;
-}
-
-.slidev-layout table {
-  font-size: 0.85rem;
-}
-
-.slidev-layout td,
-.slidev-layout th {
-  padding: 0.3rem 0.6rem;
 }
 
 /* A source line under a figure from another study. */

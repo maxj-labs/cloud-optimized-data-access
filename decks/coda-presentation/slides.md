@@ -1,7 +1,7 @@
 ---
 theme: default
 title: One file is easy
-info: CODA, 3 November 2026. The figures and result slides are written by benchmarks/tempo_no2/analyze.py into public/; the numbers in the slide copy are from run "hub".
+info: CODA, 3 November 2026. The benchmark figures are written by `benchmarks/trade_study/run.py report` and copied into public/figures/ (see README.md); the numbers in the slide copy are from run "hub".
 colorSchema: light
 transition: fade
 mdc: true
@@ -49,15 +49,15 @@ class: gradient
 
 # Tuned, the library <span class="accent">barely matters</span>
 
-<Figure src="figures/scan_1.svg" alt="One granule, whole scan: default stack 26.9 s, almost all of it setup and open; tuned h5py 4.6 s; virtual Zarr 4.6 s; whole-file download then h5py 5.4 s" />
+<Figure src="figures/tempo_no2_pancake_1_1d.svg" alt="One granule, whole map: default stack 26.9 s, almost all of it setup and open; tuned h5py 4.6 s; virtual Zarr 4.6 s; whole-file download then h5py 5.4 s" />
 
 <p class="text-sm">The default stack spends 25 s opening the file. Tuned h5py, virtual Zarr and a whole-file download land within a second of each other.</p>
 
 <!--
-Whole scan of one observation (granule S014 of 2025-03-13, 515 MB), 10 cold runs per library, medians. Default and tuned (1 process) from session 2, virtual from session 1, download from sessions 3–4.
-Default: earthaccess + xarray.open_mfdataset(engine="h5netcdf"); fsspec's read-ahead pulls 1.9 GB (about 4× the file) while opening. Tuned: 8 MiB block reader, one process, 85 MB.
+The whole map of one observation (case `pancake:1:1d`; granule S014 of 2025-03-13, 515 MB), 10 cold runs per library, medians. Default and tuned (1 process) from session 2, virtual from session 1, download from sessions 3–4.
+Default (arm `user_stack`): earthaccess + xarray.open_mfdataset(engine="h5netcdf"); fsspec's read-ahead pulls 1.9 GB (about 4× the file) while opening. Tuned (`tuned_h5py` with `max_workers` 1): 8 MiB block reader, one process, 85 MB. Virtual Zarr is `virtual_icechunk`; the download is `download`.
 No floor line: a single-core decode floor (1.5 s here) stops being a floor once a library decodes in parallel, which virtual Zarr does at 15 granules (next slide).
-Figure: analyze.py scan_1.svg. The deck's copy is a preview drawn from the medians above; rerun analyze.py on the hub results to regenerate it.
+Figure: tempo_no2_pancake_1_1d.svg, which `run.py report` writes from the hub run's results. See the deck's README for how to regenerate it.
 -->
 
 ---
@@ -69,15 +69,16 @@ Figure: analyze.py scan_1.svg. The deck's copy is a preview drawn from the media
 
 # Fifteen files, and the libraries <span class="accent">pull apart</span>
 
-<Figure src="figures/scan_15.svg" alt="Whole scan of 15 granules: tuned h5py with 1 process 59.3 s, with 8 processes 28.5 s, virtual Zarr 21.6 s, whole-file download then h5py 60.7 s" />
+<Figure src="figures/tempo_no2_pancake_15_1d.svg" alt="Whole map of 15 granules: tuned h5py with 1 process 59.3 s, with 8 processes 28.5 s, virtual Zarr 21.6 s, whole-file download then h5py 60.7 s" />
 
 <p class="text-sm">Fifteen times the files: virtual Zarr takes 4.7× as long, tuned h5py on one process 13×. Downloading every file moves 10.9 GB.</p>
 
 <!--
-scan:15:1d, session 5, 10 cold runs each, medians: tuned 1-process 59.3 s, tuned 8-process 28.5 s, virtual 21.6 s, download + h5py 60.7 s (download 27.3 s, decode 27.9 s). Bytes over the wire: virtual 0.68 GB, tuned 1.47 GB, download 10.9 GB. Peak memory 9–12 GB for all of them: the scan keeps fifteen full grids.
+Case `pancake:15:1d`, session 5, 10 cold runs each, medians: tuned 1-process 59.3 s, tuned 8-process 28.5 s, virtual 21.6 s, download + h5py 60.7 s (download 27.3 s, decode 27.9 s). Bytes over the wire: virtual 0.68 GB, tuned 1.47 GB, download 10.9 GB. Peak memory 9–12 GB for all of them: the question keeps fifteen full grids.
 Virtual Zarr decodes in parallel (about 39 CPU-seconds over 21.6 s); the download arm decodes one granule at a time on one core.
-Same workload as the previous slide, so the two figures compare directly. CMR search for the day's files: 0.7 s, before any of this.
-Figure: analyze.py scan_15.svg, a preview copy as above.
+Same question as the previous slide over more files, so the two figures compare directly. CMR search for the day's files: 0.7 s, before any of this.
+The download and decode times are the download arm's `byte_split`.
+Figure: tempo_no2_pancake_15_1d.svg, from `run.py report` as above.
 -->
 
 ---
@@ -177,7 +178,29 @@ The ESDIS spotlight reports a separate 45× for opening and reading one day; a d
 </div>
 
 <!--
-Built today: time, peak memory and cost per run, the floor, and the correctness gate, for tuned NetCDF libraries and virtual Zarr. Proposed: the caching-service and reprocessed-Zarr arms, under the same protocol.
+Built today (benchmarks/trade_study): time to first byte in parts, end to end, peak memory and cost per run, the floor, and the correctness gate, for tuned NetCDF libraries and virtual Zarr. Proposed: the caching-service and reprocessed-Zarr arms, under the same protocol. `run.py status` prints which is which.
+-->
+
+---
+
+<span class="eyebrow">Systematic benchmarking</span>
+
+# One harness for <span class="accent">every option</span>
+
+<div class="cards">
+  <div class="card"><b>1 · Pin</b>The files, the grid and the store snapshot go into a committed manifest.</div>
+  <div class="card"><b>2 · Gate</b>Every library must return the same values before it is timed.</div>
+  <div class="card"><b>3 · Time</b>A fresh process per run, in shuffled order, timed in parts: authenticate, open, find the chunks, read.</div>
+  <div class="card"><b>4 · Report</b>Medians, paired speedups and a figure for every question.</div>
+</div>
+
+<p class="text-sm mt-6">Built so far: two datasets (TEMPO NO₂, and GOES-19, which anyone can rerun without credentials), four ways of reading them, and four shapes of question. A new dataset is one file; a new library is one class.</p>
+
+<!--
+The four steps are subcommands of benchmarks/trade_study/run.py: `discover`, `gate`, `session`, `report`.
+Ways of reading (arms): `user_stack`, `tuned_h5py`, `download`, `virtual_icechunk`. A fifth, `virtual_dmrpp`, builds the virtual store from OPeNDAP's DMR++ sidecars; it runs but OPeNDAP has not reviewed it. Registered, not built: h5coro, SlideRule, the HDF5 ROS3 block cache, S3 Express, Harmony, AppEEARS, OPeNDAP.
+Questions: the whole map (`pancake`), a time series at points (`churro`), statistics over a box (`box`), every chunk of the window (`batch`).
+The numbers in Part 1 and on the next slide were measured with the first version of this benchmark, which read TEMPO only. Its code is now part of this harness, and `report` still reads its results.
 -->
 
 ---
@@ -186,12 +209,13 @@ Built today: time, peak memory and cost per run, the floor, and the correctness 
 
 # An example: TEMPO across <span class="accent">tuned libraries</span>
 
-<Figure src="figures/aoi_100.svg" alt="100 km box over one day: tuned h5py with 1 process 26.4 s, with 8 processes 8.1 s, Virtual Zarr 4.7 s, each split into setup and open (hatched) and read and decode" />
+<Figure src="figures/tempo_no2_box_100_1d.svg" alt="100 km box over one day: tuned h5py with 1 process 26.4 s, with 8 processes 8.1 s, Virtual Zarr 4.7 s, each split into setup and open (hatched) and read and decode" />
 
 <p class="credits">This work · one event day of TEMPO NO₂ (15 granules), 100 km box, 10 cold runs per library, medians</p>
 
 <!--
-Same files, same question, every library tuned: h5py with 8 MiB blocks at 1 process (26.4 s) and 8 processes (8.1 s), and Virtual Zarr through Icechunk (4.7 s). Tuning the client is worth 3.3×; virtualization adds 1.7× on top. Answers checked equal across libraries.
+Same files, same question (case `box:100:1d`), every library tuned: h5py with 8 MiB blocks at 1 process (26.4 s) and 8 processes (8.1 s), and Virtual Zarr through Icechunk (4.7 s). Tuning the client is worth 3.3×; virtualization adds 1.7× on top. Both ratios are in the report's paired-speedups table. Answers checked equal across libraries by the gate.
+Figure: tempo_no2_box_100_1d.svg, from `run.py report` on the hub run's results.
 -->
 
 ---

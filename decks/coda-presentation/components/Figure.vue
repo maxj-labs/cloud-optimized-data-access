@@ -1,6 +1,7 @@
 <script setup>
-// One figure from public/. The src is bound at runtime, as in FigureGrid, so the build does not
-// try to resolve a file that only exists after analyze.py runs; a missing figure shows its alt text.
+// One figure from public/. The src is bound at runtime so the build does not try to resolve it:
+// a figure that has not been copied into public/figures/ yet shows its alt text instead of
+// failing the build.
 defineProps({ src: { type: String, required: true }, alt: { type: String, default: '' } })
 </script>
 
