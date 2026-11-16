@@ -1,7 +1,8 @@
 # cloud-optimized-data-access
 
-Supporting materials for the Cloud Optimized Data Access Trade Study: the
-ODSI team's benchmark and decks for the working group.
+Supporting materials for the Cloud Optimized Data Access Trade Study, from
+the ODSI team: a benchmark of ways to read the same data, a study of whether
+DMR++ sidecars still describe their files, and decks for the working group.
 
 ## What is here
 
@@ -27,7 +28,7 @@ $run build-store --dataset goes19 --window 1h    # a local virtual store over th
 $run probe       --dataset goes19                # the link's round-trip time and bandwidth
 $run gate        --dataset goes19 --window 1h    # every arm must return the same values
 $run session     --dataset goes19 --window 1h --run-id <id> --yes
-$run report      results/trade_study/<id>        # summary.md, summary.json, figures/
+$run report      results/trade_study/<id>        # summary.md (the committed copy), summary.json, figures/
 ```
 
 TEMPO NO₂ needs an Earthdata login and either a machine in us-west-2 or
@@ -35,6 +36,24 @@ TEMPO NO₂ needs an Earthdata login and either a machine in us-west-2 or
 through earthaccess's normal strategies (environment, netrc, or prompt);
 nothing is pasted anywhere. Headline timing runs on one dedicated EC2
 instance.
+
+## The DMR++ study
+
+A DMR++ sidecar records where every chunk of one version of a file sits. If
+the file is replaced and the sidecar is not rebuilt, whatever reads through
+the sidecar reads the wrong bytes. `dmrpp/` asks how often that has happened
+in NASA's cloud archives, in three steps: a sampled survey of every
+collection, a complete listing of one collection, and a verifier that
+compares a sidecar with the file's own index chunk by chunk.
+
+The survey's report can be rebuilt offline from the committed data:
+
+```sh
+uv run python -m dmrpp.survey report results/dmrpp_staleness
+```
+
+The other steps need the `dmrpp` extra and an Earthdata login, and the
+listing needs a machine in us-west-2; see `dmrpp/README.md`.
 
 ## Develop
 
