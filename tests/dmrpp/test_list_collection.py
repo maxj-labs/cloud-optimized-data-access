@@ -6,7 +6,7 @@ import importlib.util
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-spec = importlib.util.spec_from_file_location("list_dmrpp_staleness", Path(__file__).parents[1] / "scripts" / "list_dmrpp_staleness.py")
+spec = importlib.util.spec_from_file_location("list_dmrpp_staleness", Path(__file__).parents[2] / "dmrpp" / "list_collection.py")
 listing = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(listing)
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-spec = importlib.util.spec_from_file_location("dmrpp_staleness", Path(__file__).parents[1] / "scripts" / "dmrpp_staleness.py")
+spec = importlib.util.spec_from_file_location("dmrpp_staleness", Path(__file__).parents[2] / "dmrpp" / "survey.py")
 stale = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(stale)
 

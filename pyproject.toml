@@ -33,7 +33,7 @@ dev = ["pytest"]
 line-length = 120
 target-version = "py312"
 # The DMR++ staleness scripts are a separate piece of work and are not linted or formatted yet.
-extend-exclude = ["scripts", "tests/test_dmrpp_staleness.py", "tests/test_list_dmrpp_staleness.py", "tests/test_verify_dmrpp.py"]
+extend-exclude = ["dmrpp", "tests/dmrpp"]
 
 [tool.ruff.lint]
 # pyflakes and pycodestyle, import order, likely bugs, outdated syntax, blanket excepts

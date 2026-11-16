@@ -6,7 +6,7 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
-spec = importlib.util.spec_from_file_location("verify_dmrpp", Path(__file__).parents[1] / "scripts" / "verify_dmrpp.py")
+spec = importlib.util.spec_from_file_location("verify_dmrpp", Path(__file__).parents[2] / "dmrpp" / "verify" / "granule.py")
 verify = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verify)
 
