@@ -1,7 +1,10 @@
 """The correctness gate: every arm must return the reference arm's values
 before its timings count.
 
-Arms are compared on the first, middle and last observation of each case.
+Arms are compared on the first, middle and last observation of each case,
+read together in one question, so an arm is checked on the code a trial
+times: worker processes, a multi-file open, a selection of several time
+steps. An arm variant (``arm=JSON`` settings) is gated as an arm of its own.
 Fill masks and times must be equal, and values must agree within a relative
 1e-6 (h5py decodes packed integers in float64, xarray in float32). ``exact``
 and ``close`` are recorded apart. A comparison where every value is fill on
@@ -10,6 +13,7 @@ both sides is ``vacuous``: it proves nothing, so it is never a pass.
 
 from __future__ import annotations
 
+import json
 import sys
 from typing import Any
 
@@ -32,6 +36,11 @@ def make_arm(name: str, dataset: Dataset, payload: dict[str, Any], settings: dic
             raise SystemExit(f"unknown arm {name!r}; one of {sorted(ARM_INFO)}")
         raise SystemExit(f"arm {name!r} is {info.status}, not built. Needs: {info.needs or 'see the README'}")
     return ARM_CLASSES[name](dataset, payload, settings)
+
+
+def gate_key(arm: str, settings: dict[str, Any] | None = None) -> str:
+    """The name a verdict is filed under: the arm, plus its variant's settings when it has any."""
+    return f"{arm} {json.dumps(settings, sort_keys=True)}" if settings else arm
 
 
 def compare(reference: Result, other: Result) -> tuple[str, float]:
@@ -63,12 +72,20 @@ def gate_observations(n: int) -> list[int]:
     return sorted({0, n // 2, n - 1})
 
 
-def _read_or_error(arm: Arm, observation: int, selection: Any) -> Result | Exception:
+def _read_or_error(arm: Arm, observations: list[int], selection: Any) -> Result | Exception:
     try:
-        arm.open([observation])
-        return arm.read([observation], selection)
+        arm.open(observations)
+        return arm.read(observations, selection)
     except Exception as error:  # noqa: BLE001 -- a read failure is a gate row, not a crash
         return error
+
+
+def _one(result: Result | Exception, position: int) -> Result | Exception:
+    """One observation of a result; an error stands for every observation it was read with."""
+    if isinstance(result, Exception):
+        return result
+    values = {name: array[position : position + 1] for name, array in result.values.items()}
+    return Result(result.times[position : position + 1], values)
 
 
 def _verdict(reference: Result | Exception, other: Result | Exception) -> tuple[str, float]:
@@ -82,37 +99,43 @@ def _verdict(reference: Result | Exception, other: Result | Exception) -> tuple[
 
 
 def run_gate(
-    dataset: Dataset, payload: dict[str, Any], arm_names: tuple[str, ...], cases: list[Case]
+    dataset: Dataset,
+    payload: dict[str, Any],
+    arm_names: tuple[str, ...],
+    cases: list[Case],
+    variants: list[tuple[str, dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Every arm against the first one. One row per (case, arm, observation). Network."""
-    arms = []
-    for name in arm_names:
-        arm = make_arm(name, dataset, payload)
+    """Every arm, and every variant, against the first arm. One row per
+    (case, arm, observation); a variant's rows carry its :func:`gate_key`. Network."""
+    arms: list[tuple[str, Arm]] = []
+    for name, settings in [*((name, None) for name in arm_names), *(variants or [])]:
+        arm = make_arm(name, dataset, payload, settings)
         arm.authenticate()
-        arms.append(arm)
-    reference, rows = arms[0], []
+        arms.append((gate_key(name, settings), arm))
+    reference, rows = arms[0][0], []
     try:
         for case in cases:
             selection = dataset.selection(case, payload["grid"])
             n_observations = len(dataset.observations(case, len(payload["granules"])))
-            for observation in gate_observations(n_observations):
-                results = [_read_or_error(arm, observation, selection) for arm in arms]
-                for arm, result in zip(arms[1:], results[1:], strict=True):
-                    status, worst = _verdict(results[0], result)
+            observations = gate_observations(n_observations)
+            results = [_read_or_error(arm, observations, selection) for _, arm in arms]
+            for position, observation in enumerate(observations):
+                for (key, _), result in zip(arms[1:], results[1:], strict=True):
+                    status, worst = _verdict(_one(results[0], position), _one(result, position))
                     rows.append(
                         {
                             "case": str(case),
-                            "arm": arm.name,
-                            "reference": reference.name,
+                            "arm": key,
+                            "reference": reference,
                             "observation": observation,
                             "status": status,
                             "max_rel_diff": worst,
                         }
                     )
-                    message = f"gate {case} {arm.name} vs {reference.name} observation {observation}: {status}"
+                    message = f"gate {case} {key} vs {reference} observation {observation}: {status}"
                     print(message, file=sys.stderr, flush=True)
     finally:
-        for arm in arms:
+        for _, arm in arms:
             arm.close()
     return rows
 

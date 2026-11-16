@@ -3,6 +3,10 @@
 A fresh process per trial keeps one arm's caches, connections and imports
 from helping the next. The order is shuffled inside each repetition so drift
 in the network or the host does not line up with one arm.
+
+Running a session again under the same run id and session resumes it: trials
+that already have an ``ok`` row are skipped, so a (session, repetition) never
+holds the same trial twice.
 """
 
 from __future__ import annotations
@@ -126,13 +130,38 @@ def _failed_row(dataset: Dataset, spec: TrialSpec, options: SessionOptions, reas
     )
 
 
-def run_session(dataset: Dataset, specs: list[TrialSpec], options: SessionOptions, out_dir: Path) -> int:
-    """Run every spec, appending each row to ``out_dir/results.jsonl`` as it
-    lands. Returns the number of failed trials."""
+def _identity(row: Row) -> tuple[Any, ...]:
+    """What makes two rows the same trial of the same session."""
+    variant = json.dumps(row.arm_variant or {}, sort_keys=True)
+    return (
+        row.dataset, row.transport, row.session_id, row.arm, variant,
+        row.workload, row.case_size, row.window, row.measure, row.repetition,
+    )  # fmt: skip
+
+
+def _spec_identity(dataset: Dataset, spec: TrialSpec, options: SessionOptions) -> tuple[Any, ...]:
+    return _identity(_failed_row(dataset, spec, options, "", ""))
+
+
+def completed(results_file: Path) -> set[tuple[Any, ...]]:
+    """The trials ``results_file`` already holds an ``ok`` row for."""
+    if not results_file.exists():
+        return set()
+    rows = (Row.from_json(line) for line in results_file.read_text().splitlines() if line.strip())
+    return {_identity(row) for row in rows if row.status == "ok"}
+
+
+def run_session(dataset: Dataset, specs: list[TrialSpec], options: SessionOptions, out_dir: Path) -> tuple[int, int]:
+    """Run every spec that has no ``ok`` row yet, appending each row to
+    ``out_dir/results.jsonl`` as it lands. Returns (trials run, trials failed)."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    failed = 0
+    done = completed(out_dir / "results.jsonl")
+    ran = failed = 0
     with (out_dir / "results.jsonl").open("a") as results:
         for index, spec in enumerate(specs, start=1):
+            if _spec_identity(dataset, spec, options) in done:
+                continue
+            ran += 1
             row = run_in_subprocess(dataset, spec, options)
             failed += row.status != "ok"
             results.write(row.to_json() + "\n")
@@ -141,4 +170,4 @@ def run_session(dataset: Dataset, specs: list[TrialSpec], options: SessionOption
             outcome = f"{seconds:.2f} s" if row.status == "ok" else row.status
             progress = f"[{index}/{len(specs)}] {spec.arm} {spec.case} {spec.measure} rep {spec.rep}: {outcome}"
             print(progress, file=sys.stderr, flush=True)
-    return failed
+    return ran, failed

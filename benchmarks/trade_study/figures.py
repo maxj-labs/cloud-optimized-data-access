@@ -110,10 +110,21 @@ def figure_name(cell: dict[str, Any]) -> str:
 
 
 def write_figures(summary: dict[str, Any], out_dir: Path) -> list[Path]:
-    """A figure for every whole-question case with at least two arms to compare."""
-    by_case: dict[str, list[dict[str, Any]]] = {}
+    """A figure for every whole-question case with at least two arms to compare.
+    In-region and out-of-region cells never share a figure: when a run holds
+    both for one case, each figure's name says which it is."""
+    by_case: dict[str, dict[bool, list[dict[str, Any]]]] = {}
     for cell in summary["cells"]:
         if cell["measure"] == "full" and cell["end_to_end_seconds"] is not None:
-            by_case.setdefault(figure_name(cell), []).append(cell)
+            by_case.setdefault(figure_name(cell), {}).setdefault(bool(cell["in_region"]), []).append(cell)
     out_dir.mkdir(parents=True, exist_ok=True)
-    return [draw_case(cells, out_dir / name) for name, cells in sorted(by_case.items()) if len(cells) >= 2]
+    written = []
+    for name, by_region in sorted(by_case.items()):
+        for in_region, cells in sorted(by_region.items()):
+            if len(cells) < 2:
+                continue
+            path = out_dir / name
+            if len(by_region) > 1:
+                path = path.with_name(f"{path.stem}_{'in-region' if in_region else 'out-of-region'}.svg")
+            written.append(draw_case(cells, path))
+    return written

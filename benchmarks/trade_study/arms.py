@@ -62,6 +62,7 @@ class Arm:
     ``settings`` overrides the arm's defaults, one tuning factor at a time."""
 
     name: str
+    auth_reason: str | None = None  # why ``authenticate`` is not a step of its own
     chunk_id_reason: str | None = None  # why ``locate`` is not a step of its own
     manifest_reason: str | None = None  # why ``open`` loads no index
     first_value_only = False  # set by a first-byte trial: set up for the question, read one value
@@ -195,8 +196,10 @@ def _ready(_: int) -> int:
 class TunedH5py(Arm):
     """h5py over an 8 MiB block reader; one process per granule when the
     question spans several, because h5py holds one global lock and threads
-    cannot overlap its reads. Settings follow the NSIDC cloud-optimized HDF5
-    study; the page buffer applies only to paged files."""
+    cannot overlap its reads. The granule ``open`` loaded is read in this
+    process while the workers read the others, so no granule is opened twice.
+    Settings follow the NSIDC cloud-optimized HDF5 study; the page buffer
+    applies only to paged files."""
 
     name = "tuned_h5py"
 
@@ -256,7 +259,7 @@ class TunedH5py(Arm):
 
     def locate(self, observations: list[int], selection: Selection) -> bool:
         if self._uses_workers(observations):
-            self.chunk_id_reason = "inside the read: each worker process looks up its own granule's chunks"
+            self.chunk_id_reason = "inside the read: each process looks up its own granule's chunks"
             return False
         for o in observations:
             h5.locate_chunks(self._handle(o), self.dataset.variables, selection)
@@ -267,14 +270,23 @@ class TunedH5py(Arm):
         names = self.dataset.variable_names
         if not self._uses_workers(observations):
             return _stack(names, [h5.read_selection(self._handle(o), h5_spec, selection) for o in observations])
-        jobs = [
-            (self.store_spec, self._path(o), self.block_size, self.page_buf_size, self.paged, h5_spec, selection)
+        # granules already open here are read here, alongside the workers
+        in_workers = {
+            o: self._pool.submit(
+                _tuned_worker,
+                self.store_spec, self._path(o), self.block_size, self.page_buf_size, self.paged, h5_spec, selection,
+            )
             for o in observations
-        ]
-        results = list(self._pool.map(_tuned_worker, *zip(*jobs, strict=True)))
-        for _, _, counts in results:
+            if o not in self._handles
+        }  # fmt: skip
+        per_granule = {
+            o: h5.read_selection(self._handles[o][0], h5_spec, selection) for o in observations if o not in in_workers
+        }
+        for o, future in in_workers.items():
+            when, values, counts = future.result()
             add_counts(self._worker_counts, counts)
-        return _stack(names, [(when, values) for when, values, _ in results])
+            per_granule[o] = (when, values)
+        return _stack(names, [per_granule[o] for o in observations])
 
     def counts(self) -> dict[str, Any] | None:
         total = empty_counts()
@@ -339,40 +351,55 @@ class VirtualIcechunk(Arm):
     """An Icechunk store of references to the original chunks, read through xarray."""
 
     name = "virtual_icechunk"
+    auth_reason = "inside manifest retrieval: the store fetches its own credentials when it opens"
     chunk_id_reason = "inside the read: Icechunk fetches the chunk manifest on the first chunk request"
     source = "hdf5"  # what the references were built from
 
-    def open(self, observations: list[int]) -> None:
-        import zarr
+    def authenticate(self) -> None:
+        """Nothing to fetch here: ``open_virtual`` authorizes the chunk container
+        itself, and credentials fetched now would be paid for and never used."""
 
+    def _zarr_config(self) -> dict[str, Any]:
+        """The zarr settings this arm asked for. They are in force only while it
+        opens and reads, so two arms in one process (the gate) do not share them."""
+        config: dict[str, Any] = {}
         if "zarr_concurrency" in self.given:
             # zarr-python's cap on outstanding chunk requests (default 10)
-            zarr.config.set({"async.concurrency": int(self.given["zarr_concurrency"])})
-        zarrs = bool(self.given.get("zarrs_pipeline"))
-        if zarrs:
+            config["async.concurrency"] = int(self.given["zarr_concurrency"])
+        if self.given.get("zarrs_pipeline"):
             # zarrs decodes chunks in Rust, in parallel, without the interpreter lock. Keys are set
             # one by one: replacing the whole codec_pipeline block drops zarr's own batch_size.
-            zarr.config.set(
+            config.update(
                 {
                     "codec_pipeline.path": "zarrs.ZarrsCodecPipeline",
                     "codec_pipeline.chunk_concurrent_minimum": 4,
                     "codec_pipeline.strict": False,
                 }
             )
-        self._data, self._time_index = self.dataset.open_virtual(self.payload, self.given, self.source)
+        return config
+
+    def open(self, observations: list[int]) -> None:
+        import zarr
+
+        with zarr.config.set(self._zarr_config()):
+            self._data, self._time_index = self.dataset.open_virtual(self.payload, self.given, self.source)
+            concurrency = zarr.config.get("async.concurrency")
         self.settings = {
             "client": "icechunk",
             "references_from": self.source,
             "chunks": None,
-            "zarr_concurrency": zarr.config.get("async.concurrency"),
-            "codec_pipeline": "zarrs" if zarrs else "zarr",
+            "zarr_concurrency": concurrency,
+            "codec_pipeline": "zarrs" if self.given.get("zarrs_pipeline") else "zarr",
             **{key: value for key, value in self.given.items() if key.startswith("icechunk_")},
         }
 
     def read(self, observations: list[int], selection: Selection) -> Result:
+        import zarr
+
         time_dim, y, x = self.dataset.dims
         selected = self._data[self.dataset.variable_names].isel({time_dim: self._time_index[observations]})
-        return _from_xarray(selected.isel(_indexers(y, x, selection)).load(), self.dataset)
+        with zarr.config.set(self._zarr_config()):
+            return _from_xarray(selected.isel(_indexers(y, x, selection)).load(), self.dataset)
 
     def static_minimum(self, observations: list[int], selection: Selection) -> dict[str, Any] | None:
         """Metadata objects + coordinate chunks read at open + the data chunks the
@@ -408,9 +435,6 @@ class VirtualDmrpp(VirtualIcechunk):
 
     name = "virtual_dmrpp"
     source = "dmrpp"
-
-    def authenticate(self) -> None:
-        """Credentials are fetched when the store opens: Icechunk needs them to authorize the chunk container."""
 
 
 ARM_CLASSES: dict[str, type[Arm]] = {a.name: a for a in (UserStack, TunedH5py, Download, VirtualIcechunk, VirtualDmrpp)}

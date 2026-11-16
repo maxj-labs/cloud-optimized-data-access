@@ -47,7 +47,7 @@ discover ──► build-store ──► probe ──► gate ──► session 
 | `trial.py` | One timed trial, and `Row`, the schema of `results.jsonl`. |
 | `counters.py`, `measure.py`, `probes.py`, `host.py` | What a row records besides time: requests, CPU and memory, the link's speed, the machine and the code. |
 | `gate.py` | The correctness gate. |
-| `session.py` | The plan (which trials, in what order) and the subprocess that runs each. |
+| `session.py` | The plan (which trials, in what order) and the subprocess that runs each. Running a run id again resumes it: trials with an `ok` row are skipped. |
 | `report.py`, `figures.py` | `results.jsonl` → `summary.json`, `summary.md`, `figures/`. |
 | `superchunks.py` | Arithmetic on chunk layouts; times nothing. |
 | `legacy.py` | Reads results written by the first benchmark. Temporary; see below. |
@@ -141,7 +141,7 @@ from `scope.py`.
 | Metric | What it measures | Row field | Recorded |
 |---|---|---|---|
 | Discovery (CMR query) | Finding the granules for the question | `discovery_seconds` | timed at `discover`, copied into every row; kept out of first byte |
-| Authentication | Fetching temporary S3 credentials | `auth_seconds` | per trial; 0 with a reason on public data |
+| Authentication | Fetching temporary S3 credentials | `auth_seconds` | per trial; 0 with a reason on public data; null with a reason for the virtual arms, whose store fetches its own credentials inside manifest retrieval |
 | Manifest retrieval | Loading the store's index, or opening the files | `manifest_seconds` | per trial |
 | Chunk identification | Finding which chunks a selection needs | `chunk_id_seconds` | per trial where the arm exposes the step; null with a reason where it happens inside the first read |
 | Byte retrieval | Reading and decoding the chunks | `byte_seconds` | per trial |
@@ -210,7 +210,7 @@ outside every other number.
 | Where: a dedicated EC2 host in us-west-2, plus the VEDA JupyterHub | Any host; `host_kind`, `instance_type`, `client_region`, `in_region` on every row. Run on EC2 for headlines. |
 | Runs: fresh process per trial, medians of 10 cold runs, order shuffled across arms | `session`: one subprocess per trial, order shuffled within each repetition, `--reps 10` by default. |
 | Pinning: versions, store snapshot and granule list, in every row | `git_sha`, `uv_lock_sha256`, `packages`, `snapshot_id`, `manifest_path`. Manifests are committed. |
-| Correctness gate | `gate`: every arm against the first (tuned h5py) on the first, middle and last observation of each case. Equal fill masks, equal times, values within a relative 1e-6 (h5py decodes packed integers in float64, xarray in float32); `exact` and `close` are recorded apart. `session` refuses ungated arms. |
+| Correctness gate | `gate`: every arm against the first (tuned h5py) on the first, middle and last observation of each case, read together as one question so the gate runs the code a trial times (worker processes, a multi-file open). Equal fill masks, equal times, values within a relative 1e-6 (h5py decodes packed integers in float64, xarray in float32); `exact` and `close` are recorded apart. A variant is gated as an arm of its own (`gate --variants arm=JSON`) and never inherits its arm's verdict. A later gate adds to the window's file. `session` refuses ungated arms and variants. |
 | Floor: round-trip time and bandwidth first | `probe`; every row then carries `floor_seconds`. |
 | Fairness: authors review their arm; one factor at a time | Settings are listed under [Arm settings](#arm-settings). **No arm here has been reviewed by its library's authors yet.** |
 | Reproducibility: public GOES-19 cases without credentials | Below. |
@@ -269,13 +269,19 @@ A variant changes one factor at a time and is recorded in `arm_variant`;
 
 Per cell: n, median, min and max. Speedups are paired by session and
 repetition: a trial of one arm is compared with the other arm's trial from
-the same session and repetition, so both saw the same network and host. The
-95% interval is a t-interval on the log speedup from 10 pairs up, and a
-bootstrap on the median below that. When a run has several sessions, the
-spread between the sessions' median speedups is reported, and a speedup
-inside that spread is marked as not a detectable difference. Every arm is
-compared with `virtual_icechunk`, and every variant with its own arm's
-defaults.
+the same session and repetition, so both saw the same network and host. A
+trial counts once: if a file holds the same trial of a session twice, the
+later row is used and the summary says how many were set aside. The 95%
+interval is a percentile bootstrap of the median speedup, the number it is
+printed beside. When a run has several sessions, the spread between the
+sessions' median speedups is reported, and a speedup inside that spread is
+marked as not a detectable difference; with one session there is no spread,
+so `detectable` is null and the report says so. Every arm is compared with
+`virtual_icechunk`, and every variant with its own arm's defaults.
+
+`gate` and `session` work on one window: `--window`, or the window their
+`--case` values name. They refuse cases from two windows, or a `--window`
+that disagrees with the cases.
 
 ## What came from the first benchmark
 

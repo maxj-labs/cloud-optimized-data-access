@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -175,3 +177,33 @@ def test_a_dataset_says_why_it_cannot_build_a_store(world):
         TempoNo2().build_virtual_store({}, "hdf5")
     with pytest.raises(ValueError, match="no dmrpp sidecars"):
         Goes19().build_virtual_store({}, "dmrpp")
+
+
+# --- what a TEMPO manifest pins ---------------------------------------------------
+
+
+def test_the_pin_is_the_benchmark_tag_when_the_store_has_one(world, tmp_path):
+    from benchmarks.trade_study.datasets.tempo_no2 import SNAPSHOT_TAG, resolve_pin
+    from tests.trade_study import fixtures
+
+    _, payload = world
+    granules = [Path(g["source_url"].removeprefix("file://")) for g in payload["granules"]]
+    repo, first = fixtures.make_virtual_store(tmp_path, granules)
+    assert resolve_pin(repo) == (first, None)  # no tag yet: main's tip, and the manifest says it is untagged
+    repo.create_tag(SNAPSHOT_TAG, first)
+    later = repo.writable_session("main").commit("a later commit on main", allow_empty=True)
+    assert later != first and resolve_pin(repo) == (first, SNAPSHOT_TAG)  # the tag, not the tip
+
+
+def test_describe_grid_pins_the_snapshot_and_the_stores_own_grid(world):
+    dataset, payload = world
+    grid = dataset.describe_grid(payload["granules"])
+    assert grid.pop("snapshot_id") == payload["snapshot_id"]
+    for axis in ("latitude", "longitude"):
+        assert grid[axis]["size"] == payload["grid"][axis]["size"]
+        assert grid[axis]["first"] == pytest.approx(payload["grid"][axis]["first"], abs=1e-4)
+        assert grid[axis]["last"] == pytest.approx(payload["grid"][axis]["last"], abs=1e-4)
+    # a granule the snapshot does not hold is refused when the manifest is written, not at the first trial
+    missing = [{**payload["granules"][0], "start_time": "2025-03-20T12:00:00Z"}]
+    with pytest.raises(RuntimeError, match="missing from the store snapshot"):
+        dataset.describe_grid(missing)

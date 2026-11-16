@@ -24,12 +24,15 @@ def write_rows(run_dir: Path, rows: list[Row]) -> None:
 
 def timed(arm: str, seconds: float, rep: int, session: str = "1", variant: dict | None = None, **fields) -> Row:
     """A whole-question row for the 100 km box, as if the trial had taken ``seconds``."""
-    return Row(
+    row = Row(
         run_id="t", session_id=session, dataset="tempo_no2", arm=arm, arm_variant=variant or {}, workload="box",
         case_size=100, window="1d", measure="full", observation_count=15, repetition=rep, in_region=True,
         auth_seconds=0.1, manifest_seconds=seconds / 4, byte_seconds=seconds / 2, end_to_end_seconds=seconds,
-        gate_status="pass", status="ok", **fields,
+        gate_status="pass", status="ok",
     )  # fmt: skip
+    for name, value in fields.items():
+        setattr(row, name, value)
+    return row
 
 
 # --- medians ----------------------------------------------------------------------
@@ -93,7 +96,9 @@ def test_speedups_pair_trials_by_session_and_repetition(tmp_path):
     against_virtual = speedup(summary, "tuned_h5py", "virtual_icechunk")
     assert against_virtual["speedup_median"] == pytest.approx(3.0) and against_virtual["n"] == 10
     assert against_virtual["ci_low"] == pytest.approx(3.0) and against_virtual["ci_high"] == pytest.approx(3.0)
-    assert against_virtual["detectable"]
+    # one session: there is no spread between sessions to judge the speedup against
+    assert against_virtual["sessions"] == 1
+    assert against_virtual["detectable"] is None and against_virtual["session_spread"] is None
     # a variant is also compared with its own arm's defaults: what the tuning factor alone is worth
     one_worker = '{"max_workers": 1}'
     assert speedup(summary, "tuned_h5py", "tuned_h5py", one_worker)["speedup_median"] == pytest.approx(3.0)
@@ -101,6 +106,33 @@ def test_speedups_pair_trials_by_session_and_repetition(tmp_path):
     text = report.render(summary)
     assert "## tempo_no2: paired speedups" in text
     assert '| `tuned_h5py` {"max_workers": 1} | `tuned_h5py` | **3.00×** |' in text
+    assert report.ONE_SESSION in text and "inside the spread between sessions" not in text
+
+
+def test_the_interval_is_on_the_median_it_is_printed_beside(tmp_path):
+    rows = []
+    for rep, slow in enumerate([2.0] * 11 + [200.0]):  # one outlier: the median stays 1, the mean does not
+        rows += [timed("virtual_icechunk", 2.0, rep), timed("tuned_h5py", slow, rep)]
+    write_rows(tmp_path, rows)
+    result = speedup(report.summarize(report.load(tmp_path)), "tuned_h5py", "virtual_icechunk")
+    assert result["speedup_median"] == pytest.approx(1.0)
+    assert result["ci_low"] <= result["speedup_median"] <= result["ci_high"] < 2
+
+
+def test_a_trial_written_twice_counts_once(tmp_path):
+    """A session started again under the same name appends to the same file."""
+    rows = []
+    for rep in range(3):
+        rows += [timed("virtual_icechunk", 2.0, rep), timed("tuned_h5py", 6.0, rep)]
+    again = [timed("virtual_icechunk", 1.0, rep) for rep in range(3)]  # the later rows are the ones kept
+    write_rows(tmp_path, rows + again)
+    summary = report.summarize(report.load(tmp_path))
+    assert summary["rows"] == 9 and summary["repeated"] == 3
+    result = speedup(summary, "tuned_h5py", "virtual_icechunk")
+    assert result["n"] == 3 and result["speedup_median"] == pytest.approx(6.0)
+    cell = next(c for c in summary["cells"] if c["arm"] == "virtual_icechunk")
+    assert cell["n"] == 3 and cell["end_to_end_seconds"] == 1.0
+    assert "3 rows repeat an earlier trial" in report.render(summary)
 
 
 def test_a_speedup_inside_the_spread_between_sessions_is_not_detectable(tmp_path):
@@ -133,6 +165,19 @@ def test_report_draws_one_figure_per_case_with_two_or_more_arms(tmp_path):
     # text stays text, so the deck can set it in its own font
     for label in ("Tuned h5py, 1 process", "Tuned h5py", "Virtual store", "26.4 s", "100 km box over 15 granules"):
         assert label in svg, label
+
+
+def test_in_region_and_out_of_region_cells_never_share_a_figure(tmp_path):
+    rows = []
+    for in_region, scale in ((True, 1.0), (False, 10.0)):
+        for arm, seconds in (("virtual_icechunk", 4.0), ("tuned_h5py", 8.0)):
+            rows.append(timed(arm, seconds * scale, 0, in_region=in_region))
+    write_rows(tmp_path, rows)
+    report.write_report(tmp_path)
+    names = sorted(path.name for path in (tmp_path / "figures").glob("*.svg"))
+    assert names == ["tempo_no2_box_100_1d_in-region.svg", "tempo_no2_box_100_1d_out-of-region.svg"]
+    inside = (tmp_path / "figures" / names[0]).read_text()
+    assert "8.0 s" in inside and "80.0 s" not in inside
 
 
 def test_no_figures_when_asked(tmp_path):

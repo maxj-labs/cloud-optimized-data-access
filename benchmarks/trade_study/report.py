@@ -1,7 +1,9 @@
 """Medians per arm, case and measure, and paired speedups → ``summary.json``,
 ``summary.md`` and one figure per case.
 
-Only ``status == "ok"`` rows count. A cell is (dataset, transport, arm,
+Only ``status == "ok"`` rows count, and a trial counts once: when a file
+holds the same (cell, session, repetition) twice, the later row is kept and
+the summary says how many were set aside. A cell is (dataset, transport, arm,
 variant, case, measure, in_region); in-region and out-of-region rows never
 share a cell.
 """
@@ -29,7 +31,7 @@ MEDIANS = (
 )  # fmt: skip
 # Copied from a cell's first row: the same for every row of the cell.
 CONSTANTS = (
-    "arm_status", "section", "gate_status", "request_count_kind", "chunk_id_reason", "manifest_reason",
+    "arm_status", "section", "gate_status", "request_count_kind", "auth_reason", "chunk_id_reason", "manifest_reason",
     "observation_count", "index_location", "discovery_seconds", "discovery_kind", "host_kind", "client_region",
 )  # fmt: skip
 CASE_KEYS = ["dataset", "transport", "in_region", "workload", "case_size", "window", "measure"]
@@ -86,17 +88,15 @@ def _cell(key: tuple, group: pd.DataFrame) -> dict[str, Any]:
 
 
 def _interval(log_ratios: np.ndarray) -> tuple[float, float]:
-    """A 95% interval on the log speedup: a t-interval on the mean from 10
-    pairs up, a bootstrap on the median below that. NaN with fewer than 2."""
+    """A 95% interval on the median log speedup, the number the report quotes:
+    a percentile bootstrap over the pairs. NaN with fewer than 2."""
     from scipy import stats
 
-    n = len(log_ratios)
-    if n < 2:
+    if len(log_ratios) < 2:
         return float("nan"), float("nan")
-    if n >= 10:
-        half = stats.t.ppf(0.975, n - 1) * log_ratios.std(ddof=1) / math.sqrt(n)
-        return float(log_ratios.mean() - half), float(log_ratios.mean() + half)
-    resampled = stats.bootstrap((log_ratios,), np.median, confidence_level=0.95, n_resamples=2000, random_state=0)
+    resampled = stats.bootstrap(
+        (log_ratios,), np.median, confidence_level=0.95, n_resamples=2000, method="percentile", random_state=0
+    )
     return float(resampled.confidence_interval.low), float(resampled.confidence_interval.high)
 
 
@@ -109,7 +109,11 @@ def _speedup(case: dict[str, Any], slow: pd.DataFrame, fast: pd.DataFrame, secon
     low, high = _interval(np.log(ratio.to_numpy()))
     median = float(ratio.median())
     per_session = ratio.groupby(pairs["session_id"]).median()
-    spread = float(per_session.max() - per_session.min()) if len(per_session) > 1 else 0.0
+    # the spread between sessions needs two sessions; with one there is nothing to judge a speedup against
+    spread = float(per_session.max() - per_session.min()) if len(per_session) > 1 else None
+    detectable = None
+    if spread is not None:
+        detectable = abs(math.log(median)) > math.log(1 + spread / median) if median > 0 else False
     return {
         **case,
         "from_arm": slow["arm"].iloc[0],
@@ -120,9 +124,11 @@ def _speedup(case: dict[str, Any], slow: pd.DataFrame, fast: pd.DataFrame, secon
         "ci_low": None if math.isnan(low) else math.exp(low),
         "ci_high": None if math.isnan(high) else math.exp(high),
         "n": len(pairs),
-        # sessions disagree by this much; a speedup inside it is not a detectable difference
+        "sessions": len(per_session),
+        # sessions disagree by this much; a speedup inside it is not a detectable difference.
+        # Both are null for a single session.
         "session_spread": spread,
-        "detectable": abs(math.log(median)) > math.log(1 + spread / median) if median > 0 else False,
+        "detectable": detectable,
     }
 
 
@@ -145,12 +151,16 @@ def paired_speedups(ok: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 def summarize(frame: pd.DataFrame) -> dict[str, Any]:
-    ok = frame[frame["status"] == "ok"]
+    every_ok = frame[frame["status"] == "ok"]
+    # one row per trial: a session run twice under one name must not pair a trial with both copies
+    trial_keys = [key for key in (*KEYS, *PAIR_KEYS) if key in every_ok]
+    ok = every_ok.drop_duplicates(subset=trial_keys, keep="last")
     failed = frame[frame["status"] != "ok"]
     return {
         "run_id": frame["run_id"].iloc[0],
         "rows": len(frame),
         "failed": len(failed),
+        "repeated": len(every_ok) - len(ok),
         "failures": failed[["arm", "workload", "case_size", "measure", "status"]].to_dict(orient="records"),
         "git_sha": frame["git_sha"].dropna().iloc[0] if frame["git_sha"].notna().any() else None,
         "cells": [_cell(key, group) for key, group in ok.groupby(KEYS, dropna=False)],
@@ -244,17 +254,27 @@ def _full_table(cells: list[dict[str, Any]]) -> list[str]:
     return _table(header, "|---|---:|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|", rows)
 
 
+ONE_SESSION = (
+    "Speedups measured in one session have no spread between sessions to be judged against: "
+    "whether they are a detectable difference is not known until a second session is run."
+)
+
+
 def _speedup_table(speedups: list[dict[str, Any]]) -> list[str]:
     header = ["Case", "Measure", "From", "To", "**Speedup**", "95% interval", "Pairs", ""]
     rows = []
     for s in sorted(speedups, key=lambda s: (s["measure"], s["workload"], s["case_size"], s["window"], s["to_arm"])):
         interval = "—" if s["ci_low"] is None else f"{s['ci_low']:.2f}–{s['ci_high']:.2f}"
-        note = "" if s["detectable"] else "inside the spread between sessions"
+        # None: a single session, which the line under the table says once
+        note = "inside the spread between sessions" if s["detectable"] is False else ""
         rows.append([
             _case(s), s["measure"], _arm(s["from_arm"], s["from_variant"]), _arm(s["to_arm"], s["to_variant"]),
             f"**{s['speedup_median']:.2f}×**", interval, str(s["n"]), note,
         ])  # fmt: skip
-    return _table(header, "|---|---|---|---|---:|---|---:|---|", rows)
+    table = _table(header, "|---|---|---|---|---:|---|---:|---|", rows)
+    if any(s["detectable"] is None for s in speedups):
+        table += ["", ONE_SESSION]
+    return table
 
 
 def _context(cells: list[dict[str, Any]]) -> str:
@@ -280,7 +300,8 @@ READING_THE_TABLES = (
     "- Floor = dependent round trips × median round-trip time + bytes ÷ measured bandwidth, from the session's probe.",
     "- $ per question = S3 requests + transfer + compute at list price. "
     "Transfer is zero in region and internet egress otherwise.",
-    "- A speedup is the median, over trials paired by session and repetition, of one arm's seconds over another's.",
+    "- A speedup is the median, over trials paired by session and repetition, of one arm's seconds over another's. "
+    "Its interval is a bootstrap of that median.",
     "- Arms marked † are not gated: their values were not checked against the reference arm.",
 )
 
@@ -292,6 +313,8 @@ def render(summary: dict[str, Any]) -> str:
         "",
         f"{summary['rows']} trials, {summary['failed']} failed. Medians of cold runs, one fresh process each.",
     ]
+    if summary.get("repeated"):
+        out += ["", f"{summary['repeated']} rows repeat an earlier trial of the same session; the later row is used."]
     if cells:
         out += ["", _context(cells)]
     for dataset in sorted({cell["dataset"] for cell in cells}):
@@ -302,6 +325,7 @@ def render(summary: dict[str, Any]) -> str:
         if speedups:
             out += ["", f"## {dataset}: paired speedups", "", *_speedup_table(speedups)]
     reasons = {(c["arm"], c[field]) for c in cells for field in ("chunk_id_reason", "manifest_reason") if c[field]}
+    reasons |= {(c["arm"], c["auth_reason"]) for c in cells if c["auth_reason"] and c["auth_seconds"] is None}
     out += ["", "## Reading the tables", ""]
     out += ["- A dash under a part means the arm does not expose that step; its time is inside Bytes:"]
     out += [f"  - `{arm}`: {reason}." for arm, reason in sorted(reasons)]

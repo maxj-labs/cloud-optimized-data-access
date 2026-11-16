@@ -180,8 +180,11 @@ class _Stopwatch:
 
 
 def _record_times(row: Row, arm: Arm, clock: _Stopwatch, public: bool) -> None:
-    row.auth_seconds = clock.authenticated - clock.start
-    row.auth_reason = "public bucket: no credentials" if public else None
+    if public or arm.auth_reason is None:
+        row.auth_seconds = clock.authenticated - clock.start
+        row.auth_reason = "public bucket: no credentials" if public else None
+    else:  # the arm authenticates inside another step, so there is nothing to report apart
+        row.auth_reason = arm.auth_reason
     row.manifest_seconds, row.manifest_reason = clock.opened - clock.authenticated, arm.manifest_reason
     if clock.chunks_located:
         row.chunk_id_seconds, row.byte_seconds = clock.located - clock.opened, clock.read - clock.located

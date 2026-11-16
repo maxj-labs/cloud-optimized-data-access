@@ -26,7 +26,7 @@ from typing import Any
 
 from benchmarks.trade_study import paths, superchunks
 from benchmarks.trade_study.datasets import DATASETS, Dataset, get_dataset, timed_discovery
-from benchmarks.trade_study.gate import GATE_RTOL, PASSING, gate_verdicts, make_arm, run_gate
+from benchmarks.trade_study.gate import GATE_RTOL, PASSING, gate_key, gate_verdicts, make_arm, run_gate
 from benchmarks.trade_study.host import REPO_ROOT, client_region, host_info, provenance
 from benchmarks.trade_study.paths import load_manifest, write_json
 from benchmarks.trade_study.probes import concurrent_rate, probe_network
@@ -36,6 +36,7 @@ from benchmarks.trade_study.session import SessionOptions, plan, run_session
 from benchmarks.trade_study.stores import build_store, store_path
 from benchmarks.trade_study.trial import DEFAULT_INSTANCE_RATE_USD_H, MEASURES, Row, run_trial
 
+DEFAULT_WINDOW = "1h"
 DEFAULT_ARMS = ("user_stack", "tuned_h5py", "download", "virtual_icechunk")
 GATE_ARMS = ("tuned_h5py", "user_stack", "download", "virtual_icechunk")  # the first is the reference
 INSTANCE_RATE = float(os.environ.get("BENCH_INSTANCE_RATE_USD_H", DEFAULT_INSTANCE_RATE_USD_H))
@@ -52,6 +53,32 @@ def is_in_region(dataset: Dataset, region: str | None) -> bool:
 
 def parse_list(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def parse_variant(text: str) -> tuple[str, dict[str, Any]]:
+    """``arm=JSON`` → (arm, its settings)."""
+    arm, separator, settings = text.partition("=")
+    try:
+        parsed = json.loads(settings) if separator else None
+    except json.JSONDecodeError:
+        parsed = None
+    if not isinstance(parsed, dict) or not parsed:
+        raise argparse.ArgumentTypeError(
+            f"bad variant {text!r}: expected arm=JSON, e.g. 'tuned_h5py={{\"max_workers\": 1}}'"
+        )
+    return arm.strip(), parsed
+
+
+def resolve_window(args: argparse.Namespace) -> str:
+    """The one window a gate or a session is about: ``--window``, or the window
+    its ``--case`` values name. They must agree, because the manifest and the
+    gate file are per window."""
+    named = sorted({case.window for case in args.case or []})
+    if len(named) > 1:
+        raise SystemExit(f"the cases name more than one window ({', '.join(named)}); run one window at a time")
+    if named and args.window and args.window != named[0]:
+        raise SystemExit(f"--window {args.window} but the cases are over {named[0]}; drop one or make them agree")
+    return named[0] if named else args.window or DEFAULT_WINDOW
 
 
 # --- pinning what a run reads -----------------------------------------------------
@@ -116,6 +143,7 @@ def cmd_probe(args: argparse.Namespace) -> int:
     # A floor needs the fastest rate the link has shown, and arms read with many
     # streams: also read with 16 ranges in flight, and keep the best rate seen.
     concurrent = max(concurrent_rate(build_store(spec), path) for _ in range(3))
+    single_stream = network["bandwidth_mb_s"]  # None when asked for no range reads
     host = host_info()
     region = client_region(host)
     out = {
@@ -123,9 +151,9 @@ def cmd_probe(args: argparse.Namespace) -> int:
         "dataset": dataset.name,
         "transport": dataset.transport,
         **network,
-        "bandwidth_single_stream_mb_s": network["bandwidth_mb_s"],
+        "bandwidth_single_stream_mb_s": single_stream,
         "bandwidth_concurrent_mb_s": concurrent,
-        "bandwidth_mb_s": max(network["bandwidth_mb_s"], concurrent),
+        "bandwidth_mb_s": concurrent if single_stream is None else max(single_stream, concurrent),
         "host": host,
         "client_region": region,
         "data_region": dataset.region,
@@ -148,12 +176,24 @@ def gate_cases(window: str) -> list[Case]:
 
 def cmd_gate(args: argparse.Namespace) -> int:
     dataset = get_dataset(args.dataset, args.transport)
-    payload = load_manifest(dataset, args.window)
-    rows = run_gate(dataset, payload, args.arms, args.case or gate_cases(args.window))
+    window = resolve_window(args)
+    payload = load_manifest(dataset, window)
+    rows = run_gate(dataset, payload, args.arms, args.case or gate_cases(window), args.variants)
     verdicts = gate_verdicts(rows, args.arms[0])
+    # A gate of some arms or variants adds to the window's file: arms it did not
+    # read keep the verdicts, and the rows behind them, that an earlier gate wrote.
+    path = paths.gate_path(dataset, window)
+    earlier = json.loads(path.read_text()) if path.exists() else {"verdicts": {}, "rows": []}
+    kept_rows = [row for row in earlier["rows"] if row["arm"] not in verdicts]
+    kept_verdicts = {arm: verdict for arm, verdict in earlier["verdicts"].items() if arm not in verdicts}
     write_json(
-        paths.gate_path(dataset, args.window),
-        {"created_at": now(), "rtol": GATE_RTOL, "verdicts": verdicts, "rows": rows},
+        path,
+        {
+            "created_at": now(),
+            "rtol": GATE_RTOL,
+            "verdicts": {**kept_verdicts, **verdicts},
+            "rows": [*kept_rows, *rows],
+        },
     )
     for arm, verdict in verdicts.items():
         print(f"{arm}: {verdict}")
@@ -184,7 +224,8 @@ def stamp(row: Row, dataset: Dataset, window: str, run_id: str, session: str, pa
     if row.arm == "virtual_dmrpp":  # its store is the locally built one, not the manifest's main snapshot
         row.snapshot_id = (payload.get("dmrpp_snapshot_ids") or {}).get(dataset.transport)
         row.index_location = "local-disk"
-    row.gate_status = read_verdicts(dataset, window).get(row.arm or "", "not gated")
+    # a variant is gated under its own settings, never on its arm's verdict
+    row.gate_status = read_verdicts(dataset, window).get(gate_key(row.arm or "", row.arm_variant), "not gated")
 
 
 def cmd_trial(args: argparse.Namespace) -> int:
@@ -212,21 +253,28 @@ def cmd_trial(args: argparse.Namespace) -> int:
 
 def cmd_session(args: argparse.Namespace) -> int:
     dataset = get_dataset(args.dataset, args.transport)
-    payload = load_manifest(dataset, args.window)
+    window = resolve_window(args)
+    payload = load_manifest(dataset, window)
     for arm in args.arms:
         make_arm(arm, dataset, payload)  # refuses arms that are not built
-    cases = args.case or headline_cases(args.window)
-    variants = [(arm, json.loads(settings)) for arm, settings in (v.split("=", 1) for v in args.variants)]
+    cases = args.case or headline_cases(window)
+    variants = args.variants
+    unplanned = [arm for arm, _ in variants if arm not in args.arms]
+    if unplanned:
+        raise SystemExit(f"variants of arms that are not in --arms: {unplanned}")
     specs = plan(args.arms, cases, args.reps, variants, measures=args.measures)
     print(
         f"{len(specs)} trials: {len(args.arms)} arms × {len(cases)} cases × {len(args.measures)} measures "
         f"× {args.reps} repetitions{' + variants' if variants else ''}, each a fresh process, "
         f"over {len(payload['granules'])} pinned granules"
     )
-    verdicts = read_verdicts(dataset, args.window)
-    ungated = [arm for arm in args.arms if verdicts.get(arm) not in PASSING]
+    verdicts = read_verdicts(dataset, window)
+    planned = [*args.arms, *(gate_key(arm, settings) for arm, settings in variants)]
+    ungated = [key for key in planned if verdicts.get(key) not in PASSING]
     if ungated and not args.allow_ungated:
-        hint = f"run.py gate --dataset {dataset.name} --window {args.window}"
+        hint = f"run.py gate --dataset {dataset.name} --window {window}"
+        if variants:
+            hint += " --variants " + " --variants ".join(f"'{arm}={json.dumps(s)}'" for arm, s in variants)
         print(f"not gated: {ungated}. Run `{hint}` first, or pass --allow-ungated.", file=sys.stderr)
         return 2
     if not args.yes:
@@ -238,8 +286,9 @@ def cmd_session(args: argparse.Namespace) -> int:
         probes = None
     options = SessionOptions(args.run_id, args.session, args.instance_rate_usd_h, args.timeout_s, probes)
     out_dir = paths.RESULTS / args.run_id
-    failed = run_session(dataset, specs, options, out_dir)
-    print(f"done: {len(specs)} trials, {failed} failed, rows in {out_dir / 'results.jsonl'}")
+    ran, failed = run_session(dataset, specs, options, out_dir)
+    skipped = f", {len(specs) - ran} already done and skipped" if ran < len(specs) else ""
+    print(f"done: {ran} trials, {failed} failed{skipped}, rows in {out_dir / 'results.jsonl'}")
     return 0
 
 
@@ -286,7 +335,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m benchmarks.trade_study.run", description=__doc__)
     commands = parser.add_subparsers(dest="cmd", required=True)
 
-    def add(name: str, run: Any, help_: str, dataset: bool = True, window: bool = True) -> argparse.ArgumentParser:
+    def add(
+        name: str, run: Any, help_: str, dataset: bool = True, window: bool = True, window_from_cases: bool = False
+    ) -> argparse.ArgumentParser:
         command = commands.add_parser(name, help=help_)
         command.set_defaults(run=run)
         if dataset:
@@ -299,7 +350,13 @@ def build_parser() -> argparse.ArgumentParser:
                 "with an Earthdata token, from anywhere",
             )
         if dataset and window:
-            command.add_argument("--window", default="1h", help="1h (GOES-19 only), 1d, 1w or 1m")
+            if window_from_cases:
+                help_window = (
+                    f"1h (GOES-19 only), 1d, 1w or 1m; default: the --case values' window, else {DEFAULT_WINDOW}"
+                )
+                command.add_argument("--window", help=help_window)
+            else:
+                command.add_argument("--window", default=DEFAULT_WINDOW, help="1h (GOES-19 only), 1d, 1w or 1m")
         return command
 
     add("status", cmd_status, "the scope tables with each row's real status", dataset=False)
@@ -324,9 +381,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--range-mib", type=int, help="size of each bandwidth read; five must fit in one granule (default per dataset)"
     )
 
-    c = add("gate", cmd_gate, "every arm must return the first arm's values (network)")
+    c = add("gate", cmd_gate, "every arm must return the first arm's values (network)", window_from_cases=True)
     c.add_argument("--arms", type=parse_list, default=GATE_ARMS, help="comma-separated; the first is the reference")
     c.add_argument("--case", type=parse_case, action="append")
+    c.add_argument(
+        "--variants",
+        type=parse_variant,
+        action="append",
+        default=[],
+        help="arm=JSON, gated as an arm of its own, e.g. 'virtual_icechunk={\"zarrs_pipeline\": true}'",
+    )
 
     c = add("trial", cmd_trial, "one trial in this process; prints one JSON row (network)", window=False)
     c.add_argument("--arm", required=True)
@@ -340,7 +404,12 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--no-warm", action="store_true", help="skip the warm second query")
     c.add_argument("--instance-rate-usd-h", type=float, default=INSTANCE_RATE)
 
-    c = add("session", cmd_session, "the matrix, one fresh process per trial, shuffled (network)")
+    c = add(
+        "session",
+        cmd_session,
+        "the matrix, one fresh process per trial, shuffled; re-running a run id resumes it (network)",
+        window_from_cases=True,
+    )
     c.add_argument("--run-id", required=True)
     c.add_argument("--session", default="1")
     c.add_argument("--arms", type=parse_list, default=DEFAULT_ARMS)
@@ -353,6 +422,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     c.add_argument(
         "--variants",
+        type=parse_variant,
         action="append",
         default=[],
         help="arm=JSON, run on the box case, e.g. 'tuned_h5py={\"max_workers\": 1}'",

@@ -89,7 +89,10 @@ def test_tuned_arm_reuses_one_worker_pool_and_counts_its_workers_requests(world)
     arm, observations, selection = opened("tuned_h5py", dataset, payload, Case("box", 500, "1d"), {"max_workers": 2})
     try:
         assert arm.settings["workers"] == "processes"
+        opens_here = len(arm._handles)
         first = arm.read(observations, selection)
+        assert len(arm._handles) == opens_here == 1  # the granule opened here is read here, not again in a worker
+        assert arm._worker_counts["request_count"] > 0  # the other two, in the workers
         pool, requests_after_one = arm._pool, arm.counts()["request_count"]
         second = arm.read(observations, selection)
         assert pool is not None and arm._pool is pool
@@ -98,6 +101,24 @@ def test_tuned_arm_reuses_one_worker_pool_and_counts_its_workers_requests(world)
     finally:
         arm.close()
     assert arm._pool is None
+
+
+def test_tuned_arm_with_workers_asks_for_no_more_than_without(world):
+    """No granule is opened in this process and again in a worker."""
+    dataset, payload = world
+    counts = {}
+    for workers in (1, 2):
+        arm, observations, selection = opened(
+            "tuned_h5py", dataset, payload, Case("box", 500, "1d"), {"max_workers": workers}
+        )
+        try:
+            arm.read(observations, selection)
+            counts[workers] = arm.counts()
+        finally:
+            arm.close()
+    # in-process, the two later granules are opened inside the read; with workers, by the workers
+    assert counts[2]["request_count"] == counts[1]["request_count"]
+    assert counts[2]["bytes_requested"] == counts[1]["bytes_requested"]
 
 
 def test_tuned_arm_reads_over_http(world, monkeypatch):
@@ -128,18 +149,29 @@ def test_download_arm_fetches_every_byte_and_times_download_apart_from_decode(wo
     assert set(arm.read_split) == {"download_seconds", "decode_seconds"}
 
 
-def test_virtual_arm_records_and_applies_zarr_concurrency(world):
+def test_virtual_arm_records_and_applies_zarr_concurrency(world, monkeypatch):
     import zarr
 
     dataset, payload = world
     before = zarr.config.get("async.concurrency")
-    try:
-        arm, *_ = opened("virtual_icechunk", dataset, payload, Case("box", 500, "1d"), {"zarr_concurrency": 4})
-        assert arm.settings["zarr_concurrency"] == 4 and zarr.config.get("async.concurrency") == 4
-        opened("virtual_icechunk", dataset, payload, Case("box", 500, "1d"))  # no setting: left alone
-        assert zarr.config.get("async.concurrency") == 4
-    finally:
-        zarr.config.set({"async.concurrency": before})
+    assert before != 4
+    arm, observations, selection = opened(
+        "virtual_icechunk", dataset, payload, Case("box", 500, "1d"), {"zarr_concurrency": 4}
+    )
+    assert arm.settings["zarr_concurrency"] == 4
+    in_force = []
+    real_load = type(arm._data).load
+
+    def recording_load(self, **kwargs):
+        in_force.append(zarr.config.get("async.concurrency"))
+        return real_load(self, **kwargs)
+
+    monkeypatch.setattr(type(arm._data), "load", recording_load)
+    arm.read(observations, selection)
+    assert in_force == [4]  # in force while the arm reads
+    assert zarr.config.get("async.concurrency") == before  # and only then: the next arm is not affected
+    default, *_ = opened("virtual_icechunk", dataset, payload, Case("box", 500, "1d"))
+    assert default.settings["zarr_concurrency"] == before
 
 
 def test_virtual_arm_can_use_the_zarrs_codec_pipeline(world):
@@ -148,13 +180,13 @@ def test_virtual_arm_can_use_the_zarrs_codec_pipeline(world):
     dataset, payload = world
     case = Case("box", 500, "1d")
     default = read("virtual_icechunk", dataset, payload, case)
-    try:
-        arm, observations, selection = opened("virtual_icechunk", dataset, payload, case, {"zarrs_pipeline": True})
-        assert arm.settings["codec_pipeline"] == "zarrs"
-        np.testing.assert_array_equal(arm.read(observations, selection).values[NO2], default.values[NO2])
-        assert zarr.config.get("codec_pipeline.batch_size") is not None  # zarr's own keys survive
-    finally:
-        zarr.config.set({"codec_pipeline.path": "zarr.core.codec_pipeline.BatchedCodecPipeline"})
+    pipeline = zarr.config.get("codec_pipeline.path")
+    arm, observations, selection = opened("virtual_icechunk", dataset, payload, case, {"zarrs_pipeline": True})
+    assert arm.settings["codec_pipeline"] == "zarrs"
+    assert arm._zarr_config()["codec_pipeline.path"] == "zarrs.ZarrsCodecPipeline"
+    np.testing.assert_array_equal(arm.read(observations, selection).values[NO2], default.values[NO2])
+    assert zarr.config.get("codec_pipeline.batch_size") is not None  # zarr's own keys survive
+    assert zarr.config.get("codec_pipeline.path") == pipeline  # the pipeline is this arm's only
 
 
 def test_virtual_static_minimum_comes_from_the_stores_chunk_grid(world):
@@ -167,6 +199,44 @@ def test_virtual_static_minimum_comes_from_the_stores_chunk_grid(world):
     assert minimum["request_count"] - one_cell["request_count"] == 12 - 2
     # uncompressed chunk bytes: float64 and int16 chunks of 20 × 40
     assert one_cell["bytes_requested"] == 20 * 40 * 8 + 20 * 40 * 2
+
+
+@pytest.mark.parametrize("case", [Case("churro", 10, "1d"), Case("box", 500, "1d"), Case("pancake", 2, "1d")])
+def test_virtual_static_minimum_matches_the_chunks_hdf5_finds_in_the_files(world, case):
+    """The bound printed as "≥ n requests" is checked against a second source:
+    the files' own chunk index, as the tuned arm looks it up."""
+    import h5py
+
+    from benchmarks.trade_study import h5
+    from benchmarks.trade_study.measure import METADATA_OBJECTS
+
+    dataset, payload = world
+    arm, observations, selection = opened("virtual_icechunk", dataset, payload, case)
+    in_files = 0
+    for o in observations:
+        with h5py.File(payload["granules"][o]["source_url"].removeprefix("file://")) as handle:
+            in_files += h5.locate_chunks(handle, dataset.variables, selection)
+    minimum = arm.static_minimum(observations, selection)
+    coordinate_chunks = minimum["request_count"] - METADATA_OBJECTS - in_files
+    # the rest is coordinates: one time chunk per granule in the fixture store, one latitude, one longitude
+    assert coordinate_chunks == len(payload["granules"]) + 2
+
+
+def test_virtual_arms_fetch_no_credentials_of_their_own(world, monkeypatch):
+    """The store authorizes its chunk container when it opens; a fetch before that would be timed and never used."""
+    dataset, payload = world
+    monkeypatch.setattr(dataset, "auth", lambda: pytest.fail("the virtual arm asked for credentials"))
+    monkeypatch.setattr(type(dataset), "public", False)
+    arm = ARM_CLASSES["virtual_icechunk"](dataset, payload)
+    row = run_trial(arm, dataset, Case("box", 500, "1d"), "first_byte", warm=False)
+    assert row.status == "ok", row.error
+    assert row.auth_seconds is None and "store fetches its own credentials" in row.auth_reason
+    assert row.first_byte_seconds == pytest.approx(row.manifest_seconds + row.byte_seconds, abs=1e-3)
+    assert ARM_CLASSES["virtual_dmrpp"].authenticate is ARM_CLASSES["virtual_icechunk"].authenticate
+    # on a public bucket the step is reported as before, with why it is zero
+    monkeypatch.undo()
+    public = run_trial(ARM_CLASSES["virtual_icechunk"](dataset, payload), dataset, Case("box", 500, "1d"), "full")
+    assert public.auth_seconds is not None and public.auth_reason == "public bucket: no credentials"
 
 
 # --- trials -----------------------------------------------------------------------
