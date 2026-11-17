@@ -147,8 +147,9 @@ def verify(
             renamed = match_by_leaf(set(sidecar_index), set(file_index))
         sidecar_index = {renamed.get(n, n): v for n, v in sidecar_index.items()}
         sidecar_meta = {renamed.get(n, n): v for n, v in sidecar_meta.items()}
-        # Hyrax names an HDF4 variable by the sidecar's path, not kerchunk's
-        served_names = {f: n for n, f in renamed.items()} if out["file_format"] == "HDF4" else {}
+        # Hyrax names a variable as the sidecar does: for HDF4 by the sidecar's path, not kerchunk's,
+        # and for HDF-EOS5 as .../Data_Fields/v where the file has .../Data Fields/v
+        served_names = {f: n for n, f in renamed.items()}
         out.setdefault("sidecar_flattened", False)
         out.update(compare(sidecar_index, file_index, size, sidecar_meta, file_meta))
         out["int8_declared_int16"] = sum(
