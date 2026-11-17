@@ -49,7 +49,7 @@ import urllib.request
 from collections import Counter
 from typing import Any
 
-from dmrpp.common import CMR, GAPS, ProviderCredentials, gap_label, is_data_file, s3_store
+from dmrpp.common import CMR, GAPS, ProviderCredentials, credentials_endpoint, gap_label, is_data_file, s3_store
 from dmrpp.common import SIDECAR_SUFFIX as SIDECAR
 
 DATE_LIKE = re.compile(r"^(\d{1,4}([.\-_]?\d{1,3}){0,2}|[A-Za-z]?\d{3,8})$")
@@ -135,7 +135,9 @@ class Stores:
         self._credentials = ProviderCredentials()
 
     def get(self, bucket: str, provider: str) -> Any:
-        return s3_store(bucket, self.region, None if self.anonymous else self._credentials.get(provider))
+        if self.anonymous:
+            return s3_store(bucket, self.region, None)
+        return s3_store(bucket, self.region, self._credentials.get(provider, credentials_endpoint(bucket)))
 
 
 def summary_row(result: dict[str, Any], requests: int, seconds: float, truncated: bool) -> dict[str, Any]:

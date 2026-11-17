@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import urllib.parse
 from typing import Any
 
 CMR = "https://cmr.earthdata.nasa.gov/search/granules.umm_json"
@@ -33,20 +34,45 @@ def gap_label(seconds: float) -> str:
     )
 
 
+# Buckets whose credentials do not come from their provider's usual endpoint, by the HTTPS
+# host that serves them and by bucket. PO.DAAC keeps SWOT in a bucket of its own: the POCLOUD
+# credentials are refused there (403), and CMR names this endpoint in each SWOT collection's
+# DirectDistributionInformation.
+SWOT_CREDENTIALS = "https://archive.swot.podaac.earthdata.nasa.gov/s3credentials"
+CREDENTIAL_ENDPOINTS = {
+    "archive.swot.podaac.earthdata.nasa.gov": SWOT_CREDENTIALS,
+    "podaac-swot-ops-cumulus-protected": SWOT_CREDENTIALS,
+}
+
+
+def credentials_endpoint(*locations: str) -> str | None:
+    """The credentials endpoint to use instead of the provider's, for a bucket name or a URL's host."""
+    for location in locations:
+        host = urllib.parse.urlparse(location).netloc if "://" in location else location
+        if host in CREDENTIAL_ENDPOINTS:
+            return CREDENTIAL_ENDPOINTS[host]
+    return None
+
+
 class ProviderCredentials:
-    """Temporary S3 credentials per CMR provider: fetched once, and renewed before their hour is up."""
+    """Temporary S3 credentials per CMR provider, or per credentials endpoint
+    where a bucket has its own: fetched once, and renewed before their hour is up."""
 
     def __init__(self) -> None:
         self._held: dict[str, tuple[float, dict[str, str]]] = {}
 
-    def get(self, provider: str) -> dict[str, str]:
+    def get(self, provider: str, endpoint: str | None = None) -> dict[str, str]:
         import earthaccess
 
-        fetched, credentials = self._held.get(provider, (0.0, {}))
+        key = endpoint or provider
+        fetched, credentials = self._held.get(key, (0.0, {}))
         if not credentials or time.monotonic() - fetched > CREDENTIALS_RENEW_AFTER_S:
-            earthaccess.login()
-            credentials = earthaccess.get_s3_credentials(provider=provider)
-            self._held[provider] = (time.monotonic(), credentials)
+            auth = earthaccess.login()
+            if endpoint:
+                credentials = auth.get_s3_credentials(endpoint=endpoint)
+            else:
+                credentials = earthaccess.get_s3_credentials(provider=provider)
+            self._held[key] = (time.monotonic(), credentials)
         return credentials
 
 

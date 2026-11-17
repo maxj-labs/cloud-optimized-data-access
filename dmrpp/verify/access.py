@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from dmrpp.common import CMR, ProviderCredentials, s3_store
+from dmrpp.common import CMR, ProviderCredentials, credentials_endpoint, s3_store
 
 
 def cmr_items(query: dict[str, Any], attempts: int = 4) -> list[dict[str, Any]]:
@@ -111,8 +111,9 @@ class Access:
         return url, (f"s3://{bucket}", held[1])
 
     def s3_credentials(self, row: dict[str, str]) -> dict[str, str]:
-        """Temporary S3 credentials for the row's provider, renewed before they expire."""
-        return self._credentials.get(row.get("provider") or "")
+        """Temporary S3 credentials for the row's provider, or for its bucket's own
+        endpoint where it has one; renewed before they expire."""
+        return self._credentials.get(row.get("provider") or "", credentials_endpoint(row.get("data_url") or ""))
 
     def fsspec_options(self, row: dict[str, str], url: str) -> dict[str, Any]:
         """Storage options for parsers that open the file through fsspec (HDF4Parser, via kerchunk)."""
