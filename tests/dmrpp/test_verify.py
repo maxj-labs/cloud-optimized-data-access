@@ -363,3 +363,26 @@ def test_redo_keeps_the_granules_an_earlier_run_did_not_call_match(tmp_path):
         "skipped: file is 135 GB (--max-gb 20),https://d/e.nc\n"
     )
     assert cli.to_redo([str(earlier)]) == {"https://d/b.nc", "https://d/c.nc", "https://d/d.nc"}
+
+
+def test_merging_runs_keeps_each_granules_newest_verdict_and_says_where_it_came_from(tmp_path):
+    from dmrpp.verify import merge
+
+    first, redo = tmp_path / "survey_x.csv", tmp_path / "survey_x_redo.csv"
+    first.write_text(
+        "verdict,provider,short_name,data_url\n"
+        "error reading the sidecar: ValueError: Group not found,P,b,https://d/b.nc\n"
+        "match,P,a,https://d/a.nc\n"
+    )
+    redo.write_text("verdict,provider,short_name,data_url\nmatch,P,b,https://d/b.nc\n")
+    rows = merge.merge([first, redo])
+    assert [(r["short_name"], r["verdict"], r["run"]) for r in rows] == [
+        ("a", "match", "survey_x"),
+        ("b", "match", "survey_x_redo"),
+    ]
+    out = tmp_path / "verdicts.csv"
+    assert merge.main([str(out), str(first), str(redo)]) == 0
+    again = merge.merge([out])  # a merged file keeps its rows' origins when it is merged again
+    assert [r["run"] for r in again] == ["survey_x", "survey_x_redo"]
+    assert merge.kind("error reading the sidecar: ValueError") == "error" and merge.kind("MISMATCH") == "MISMATCH"
+    assert cli.to_redo([str(out)]) == set()

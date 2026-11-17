@@ -51,7 +51,7 @@ version's HDF4 decoder; move the pin and the corrections together.
 | Path | What |
 |---|---|
 | `results/dmrpp/survey/` | The survey of 2026-11-13: `granules.jsonl.gz` (one row per sampled granule), and the three files `report` and the one file `sample` derive from it. It stopped at 3,941 of 5,617 collections; `run` resumes where it left off. |
-| `results/dmrpp/verify/` | The verifier's verdicts, one CSV per run. None are committed yet: the runs made so far used earlier versions of the verifier, whose false alarms were fixed afterwards, so they are to be repeated with this version first. |
+| `results/dmrpp/verify/` | `verdicts.csv`: one row per granule with its newest verdict, and the run it came from. `python -m dmrpp.verify.merge` folds a new run in. Its README says which rows are findings and which are the verifier's limits. |
 
 ## Map of the code
 
@@ -61,6 +61,7 @@ version's HDF4 decoder; move the pin and the corrections together.
 | `survey.py` | Step 1. |
 | `list_collection.py` | Step 2. |
 | `verify/cli.py` | Step 3's command line, the verdicts, and which granules to pick from a CSV. |
+| `verify/merge.py` | One verdict per granule from several runs. |
 | `verify/granule.py` | One granule: index the file, read the sidecar, compare. |
 | `verify/compare.py` | The comparison itself: chunk indexes, array metadata, and matching names the two sides spell differently. |
 | `verify/sidecar.py` | What the sidecar's XML says that VirtualiZarr's DMR++ parser does not pass on (byte order, chunks kept outside the file). |
