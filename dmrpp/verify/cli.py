@@ -150,6 +150,19 @@ def normalise(row: dict[str, str]) -> dict[str, str]:
     return row
 
 
+def to_redo(verdict_files: list[str]) -> set[str]:
+    """The data URLs that earlier runs gave anything but ``match`` or ``skipped``:
+    errors, mismatches and granules with nothing to compare. Those are the rows
+    worth a second verdict after the verifier has been fixed."""
+    urls = set()
+    for path in verdict_files:
+        with open(path, newline="") as f:
+            for row in csv.DictReader(f):
+                if row["verdict"] != "match" and not row["verdict"].startswith("skipped"):
+                    urls.add(row["data_url"])
+    return urls
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="python -m dmrpp.verify", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -195,10 +208,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--start", type=int, default=1, help="begin at this granule number (as printed), to continue an interrupted run"
     )
+    p.add_argument(
+        "--redo",
+        nargs="+",
+        metavar="VERDICTS.csv",
+        help="only granules that these earlier verdict files did not call match (errors, mismatches, nothing to compare); "
+        "write the new verdicts to a file of their own with --out",
+    )
     p.add_argument("--traceback", action="store_true", help="print the full traceback when a granule errors")
     p.add_argument("--out", help="write verdicts to this CSV as well as the screen")
     args = p.parse_args(argv)
 
+    redo = to_redo(args.redo) if args.redo else None
     rows: list[dict[str, str]] = []
     for item in args.inputs:
         if item.endswith(".csv"):
@@ -210,6 +231,8 @@ def main(argv: list[str] | None = None) -> int:
                 found = [
                     r for r in found if r.get("short_name") in args.collection or r.get("concept_id") in args.collection
                 ]
+            if redo is not None:
+                found = [r for r in found if r["data_url"] in redo]
             rows += pick(found, args.per_collection, args.min_gap_days, None)
         else:
             rows.append({"data_url": item.strip(), "provider": os.environ.get("CMR_PROVIDER", "")})

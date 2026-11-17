@@ -5,7 +5,16 @@ from __future__ import annotations
 from typing import Any
 
 from dmrpp.verify.access import Access
-from dmrpp.verify.compare import compare, describe, group_paths, manifests, match_by_leaf, unflatten
+from dmrpp.verify.compare import (
+    compare,
+    describe,
+    group_paths,
+    manifests,
+    match_by_leaf,
+    match_respelled,
+    spelled,
+    unflatten,
+)
 from dmrpp.verify.hdf4 import HDF4_MAGIC, HDF4_UNSUPPORTED, patch_hdf4_decoding
 from dmrpp.verify.sidecar import apply_sidecar_notes, sidecar_group_paths, sidecar_notes, sidecar_signs
 from dmrpp.verify.values import check_values, value_candidates
@@ -84,7 +93,9 @@ def verify(
         if out["file_format"] == "HDF4":
             paths = ["", *sidecar_group_paths(sidecar_root)]
         else:
-            paths = (group_paths(file_group) or [""]) if has_groups else [""]
+            # ask for each of the file's groups under the name the sidecar gives it
+            in_sidecar = {spelled(p): p for p in sidecar_group_paths(sidecar_root)}
+            paths = [in_sidecar.get(spelled(p), p) for p in (group_paths(file_group) or [""])] if has_groups else [""]
         unread = []
         notes = sidecar_notes(sidecar_root)
         for path in paths:
@@ -94,15 +105,16 @@ def verify(
                     .parse_dataset(object_store=store, group=path or "/")
                     ._group
                 )
-            except Exception:  # noqa: BLE001 -- for HDF4, one unreadable sidecar group is counted, the rest compared
-                if out["file_format"] != "HDF4":
-                    raise
-                # VirtualiZarr 2.8.0 fails a whole group on one numeric variable whose _FillValue is text ("NA"); skip those and retry
+            except Exception:  # noqa: BLE001 -- retried below without the variables the parser cannot read
+                # VirtualiZarr 2.8.0 fails a whole group on one numeric variable whose _FillValue is text ("NA"),
+                # or on one string variable with no dimensions; skip those and retry
                 skip = [
                     n.rsplit("/", 1)[-1]
                     for n, note in notes.items()
-                    if note["text_fill"] and n.rsplit("/", 1)[0] == path
+                    if (note["text_fill"] or note["scalar_text"]) and n.rsplit("/", 1)[0] == path
                 ]
+                if out["file_format"] != "HDF4" and not skip:
+                    raise  # nothing to leave out: the granule is an error, as before
                 try:
                     if not skip:
                         raise
@@ -111,8 +123,10 @@ def verify(
                         .parse_dataset(object_store=store, group=path or "/")
                         ._group
                     )
-                    unread.append(f"{path or '/'}: skipped {', '.join(skip)} (text _FillValue)")
-                except Exception as retry_error:  # noqa: BLE001
+                    unread.append(f"{path or '/'}: skipped {', '.join(skip)} (text the parser cannot read)")
+                except Exception as retry_error:  # noqa: BLE001 -- for HDF4, one unreadable group is counted, the rest compared
+                    if out["file_format"] != "HDF4":
+                        raise
                     unread.append(f"{path or '/'}: {type(retry_error).__name__}")
                     continue
             sidecar_index.update(manifests(part, path, recurse=False))
@@ -125,7 +139,10 @@ def verify(
         if renamed:
             # an older sidecar with no groups: /data_01/ku/time is listed as /data_01_ku_time
             out["sidecar_flattened"] = True
-        elif out["file_format"] == "HDF4":
+        elif out["file_format"] != "HDF4":
+            # /HDFEOS/GRIDS/x/Data_Fields/v in the sidecar is the file's /HDFEOS/GRIDS/x/Data Fields/v
+            renamed = match_respelled(set(sidecar_index), set(file_index))
+        else:
             # kerchunk lists /Grid/Data_Fields/ET as /ET
             renamed = match_by_leaf(set(sidecar_index), set(file_index))
         sidecar_index = {renamed.get(n, n): v for n, v in sidecar_index.items()}

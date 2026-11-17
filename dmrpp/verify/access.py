@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -10,16 +12,33 @@ from typing import Any
 from dmrpp.common import CMR, ProviderCredentials, s3_store
 
 
+def cmr_items(query: dict[str, Any], attempts: int = 4) -> list[dict[str, Any]]:
+    """The granules CMR returns for ``query``. A timeout or a failed connection
+    is retried with a growing pause: the verifier asks CMR once per granule, and
+    one slow answer in a run of thousands should not cost a granule its verdict."""
+    url = f"{CMR}?{urllib.parse.urlencode(query)}"
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as response:
+                return json.load(response).get("items", [])
+        except urllib.error.HTTPError as error:
+            if error.code < 500 and error.code != 429 or attempt == attempts - 1:
+                raise
+        except (TimeoutError, urllib.error.URLError):
+            if attempt == attempts - 1:
+                raise
+        time.sleep(2**attempt)
+    return []
+
+
 def s3_url(row: dict[str, str]) -> str:
     """The granule's s3:// link from CMR; the HTTPS URL's first path segment as the bucket if CMR has none."""
     name = row["data_url"].rsplit("/", 1)[-1]
     if row.get("granule_ur") and row.get("concept_id"):
-        query = urllib.parse.urlencode({"collection_concept_id": row["concept_id"], "granule_ur": row["granule_ur"]})
-        with urllib.request.urlopen(f"{CMR}?{query}", timeout=30) as response:
-            for item in json.load(response).get("items", []):
-                for related in item["umm"].get("RelatedUrls", []):
-                    if related.get("URL", "").startswith("s3://") and related["URL"].endswith(name):
-                        return related["URL"]
+        for item in cmr_items({"collection_concept_id": row["concept_id"], "granule_ur": row["granule_ur"]}):
+            for related in item["umm"].get("RelatedUrls", []):
+                if related.get("URL", "").startswith("s3://") and related["URL"].endswith(name):
+                    return related["URL"]
     parsed = urllib.parse.urlparse(row["data_url"])
     return f"s3:/{parsed.path}"
 
@@ -41,9 +60,7 @@ def granule_identity(row: dict[str, str]) -> tuple[str, str]:
         name,
         name.rsplit(".", 1)[0],
     ):  # CMR knows a granule by its file name or by the name without the extension
-        query = urllib.parse.urlencode({"readable_granule_name": candidate, "page_size": 5, **scope})
-        with urllib.request.urlopen(f"{CMR}?{query}", timeout=60) as response:
-            items = json.load(response).get("items", [])
+        items = cmr_items({"readable_granule_name": candidate, "page_size": 5, **scope})
         if items:
             break
     if not items:

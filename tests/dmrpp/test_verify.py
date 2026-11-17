@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from dmrpp.verify import cli, compare, sidecar, values
+import pytest
+
+from dmrpp.verify import access, cli, compare, sidecar, values
 
 
 def chunk(offset, length):
@@ -212,11 +214,12 @@ def test_sidecar_groups_byte_order_and_external_chunks_are_read_from_the_xml():
     root = ElementTree.fromstring(SIDECAR_XML)
     assert sidecar.sidecar_group_paths(root) == ["/Grid", "/Grid/Data_Fields"]
     notes = sidecar.sidecar_notes(root)
-    assert notes == {
+    assert {name: {k: note[k] for k in ("big_endian", "external", "text_fill")} for name, note in notes.items()} == {
         "/Grid/Latitude": {"big_endian": False, "external": True, "text_fill": False},
         "/Grid/Data_Fields/ET": {"big_endian": True, "external": False, "text_fill": False},
         "/Grid/Data_Fields/QC": {"big_endian": True, "external": False, "text_fill": True},
     }
+    assert all(note["checksum_at"] is None and not note["scalar_text"] for note in notes.values())
     index = {"/Grid/Latitude": {"0.0": chunk(8068541, 13572)}, "/Grid/Data_Fields/ET": {"0.0": chunk(3622, 32)}}
     meta = {
         "/Grid/Latitude": {"dtype": "Float64(endianness='little')"},
@@ -249,3 +252,114 @@ def test_hdf4_value_check_asks_hyrax_only_for_variables_with_a_sidecar_name():
     meta = {"/ET": {"dtype": "Int16"}, "/QC": {"dtype": "UInt16"}}
     assert values.value_candidates("HDF4", meta, {"/ET": "/Grid/Data_Fields/ET"}) == {"/ET": {"dtype": "Int16"}}
     assert values.value_candidates("HDF5", meta, {}) == meta
+
+
+# Shapes taken from real sidecars: a Sentinel-5P file with checksummed chunks (GES DISC) and an
+# HDF-EOS5 VIIRS file (LP DAAC), whose "Data Fields" group the sidecar calls Data_Fields.
+CHECKSUM_AND_EOS5_XML = b"""<Dataset xmlns="http://xml.opendap.org/ns/DAP/4.0#" xmlns:dmrpp="http://xml.opendap.org/dap/dmrpp/1.0.0#" name="f.h5">
+<Float32 name="latitude"><dmrpp:chunks compressionType="fletcher32" fillValue="9.96921e+36" byteOrder="LE"><dmrpp:chunk offset="100" nBytes="44"/></dmrpp:chunks></Float32>
+<UByte name="histogram"><dmrpp:chunks compressionType="shuffle deflate fletcher32" deflateLevel="3" fillValue="255" byteOrder="LE"><dmrpp:chunk offset="200" nBytes="30"/></dmrpp:chunks></UByte>
+<Group name="HDFEOS_INFORMATION"><String name="StructMetadata_0"><dmrpp:chunks fillValue=""><dmrpp:chunk offset="300" nBytes="32000"/></dmrpp:chunks></String></Group>
+<Group name="HDFEOS"><Group name="GRIDS"><Group name="VIIRS_CMG_BRDF"><Group name="Data_Fields">
+<Byte name="Snow_Status"><Dim name="/YDim"/><dmrpp:chunks compressionType="deflate" fillValue="0" byteOrder="LE"><dmrpp:chunk offset="400" nBytes="9"/></dmrpp:chunks></Byte>
+</Group></Group></Group></Group>
+</Dataset>"""
+
+
+def test_the_checksum_filter_is_read_from_the_xml_because_the_parser_leaves_it_out():
+    """Without this every checksummed file read METADATA_MISMATCH: the sidecar was right and the parser dropped fletcher32."""
+    from xml.etree import ElementTree
+
+    notes = sidecar.sidecar_notes(ElementTree.fromstring(CHECKSUM_AND_EOS5_XML))
+    assert (notes["/latitude"]["checksum_at"], notes["/histogram"]["checksum_at"]) == (0, 2)
+    assert notes["/HDFEOS/GRIDS/VIIRS_CMG_BRDF/Data_Fields/Snow_Status"]["checksum_at"] is None
+    meta = {
+        "/latitude": {"dtype": "Float32(endianness='little')", "filters": []},  # as the parser reports them
+        "/histogram": {"dtype": "UInt8()", "filters": ["shuffle", "deflate"]},
+    }
+    sidecar.apply_sidecar_notes({}, meta, notes)
+    assert meta["/latitude"]["filters"] == ["fletcher32"]
+    assert meta["/histogram"]["filters"] == ["shuffle", "deflate", "fletcher32"]
+    file_meta = {
+        "/latitude": {
+            "shape": (4,),
+            "dtype": "Float32(endianness='little')",
+            "chunks": (4,),
+            "filters": ["fletcher32"],
+        },
+        "/histogram": {
+            "shape": (9,),
+            "dtype": "UInt8()",
+            "chunks": (9,),
+            "filters": ["shuffle", "deflate", "fletcher32"],
+        },
+    }
+    for name in meta:
+        meta[name] = {**file_meta[name], "filters": meta[name]["filters"]}
+    assert compare.compare_metadata(meta, file_meta) == ([], 0)
+    sidecar.apply_sidecar_notes({}, meta, notes)  # applying twice adds nothing
+    assert meta["/histogram"]["filters"].count("fletcher32") == 1
+
+
+def test_a_string_variable_with_no_dimensions_is_marked_so_its_group_can_be_read_without_it():
+    from xml.etree import ElementTree
+
+    notes = sidecar.sidecar_notes(ElementTree.fromstring(CHECKSUM_AND_EOS5_XML))
+    assert notes["/HDFEOS_INFORMATION/StructMetadata_0"]["scalar_text"]
+    assert not notes["/latitude"]["scalar_text"] and not notes["/histogram"]["text_fill"]
+
+
+def test_a_group_the_sidecar_spells_with_underscores_is_the_files_group_with_spaces():
+    from xml.etree import ElementTree
+
+    assert compare.spelled("/HDFEOS/GRIDS/VIIRS_CMG_BRDF/Data Fields") == "/HDFEOS/GRIDS/VIIRS_CMG_BRDF/Data_Fields"
+    in_sidecar = sidecar.sidecar_group_paths(ElementTree.fromstring(CHECKSUM_AND_EOS5_XML))
+    assert "/HDFEOS/GRIDS/VIIRS_CMG_BRDF/Data_Fields" in in_sidecar
+    sidecar_names = {"/HDFEOS/GRIDS/x/Data_Fields/Snow_Status", "/HDFEOS/GRIDS/x/XDim", "/only/in sidecar"}
+    file_names = {"/HDFEOS/GRIDS/x/Data Fields/Snow_Status", "/HDFEOS/GRIDS/x/XDim", "/only_in/file"}
+    assert compare.match_respelled(sidecar_names, file_names) == {
+        "/HDFEOS/GRIDS/x/Data_Fields/Snow_Status": "/HDFEOS/GRIDS/x/Data Fields/Snow_Status"
+    }
+    # two file names that respell to the same thing are not guessed between
+    assert compare.match_respelled({"/a_b"}, {"/a b", "/a-b"}) == {}
+    # names both sides already share are left alone
+    assert compare.match_respelled({"/a_b", "/c"}, {"/a_b", "/c"}) == {}
+
+
+def test_a_slow_cmr_answer_is_retried_and_a_refusal_is_not(monkeypatch):
+    import io
+    import urllib.error
+
+    outcomes = [TimeoutError("timed out"), urllib.error.URLError("reset"), io.BytesIO(b'{"items": [{"umm": {}}]}')]
+    asked = []
+
+    def urlopen(url, timeout):
+        asked.append(url)
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(access.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(access.time, "sleep", lambda seconds: None)
+    assert access.cmr_items({"granule_ur": "g"}) == [{"umm": {}}] and len(asked) == 3
+    outcomes[:] = [urllib.error.HTTPError("u", 400, "bad request", None, None)]
+    with pytest.raises(urllib.error.HTTPError):
+        access.cmr_items({"granule_ur": "g"})
+    outcomes[:] = [TimeoutError("timed out")] * 4
+    with pytest.raises(TimeoutError):
+        access.cmr_items({"granule_ur": "g"})
+    assert not outcomes  # four attempts, then the error is the granule's verdict
+
+
+def test_redo_keeps_the_granules_an_earlier_run_did_not_call_match(tmp_path):
+    earlier = tmp_path / "survey_x.csv"
+    earlier.write_text(
+        "verdict,data_url\n"
+        "match,https://d/a.nc\n"
+        "METADATA_MISMATCH,https://d/b.nc\n"
+        "error reading the sidecar: ValueError: Group /x/Data Fields not found,https://d/c.nc\n"
+        "nothing_to_compare,https://d/d.nc\n"
+        "skipped: file is 135 GB (--max-gb 20),https://d/e.nc\n"
+    )
+    assert cli.to_redo([str(earlier)]) == {"https://d/b.nc", "https://d/c.nc", "https://d/d.nc"}

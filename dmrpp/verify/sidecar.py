@@ -18,13 +18,16 @@ def sidecar_group_paths(element: Any, prefix: str = "") -> list[str]:
 
 
 def sidecar_notes(element: Any, prefix: str = "") -> dict[str, dict[str, bool]]:
-    """{variable path: {big_endian, external, text_fill}} read from the sidecar XML itself.
+    """{variable path: {big_endian, external, text_fill, checksum_at}} read from the sidecar XML itself.
 
-    VirtualiZarr 2.8.0's DMR++ parser drops both: it reads every variable as
-    little-endian whatever ``byteOrder`` says, and it reads every chunk from the
-    data file even when the chunk's ``href`` puts it elsewhere. ``text_fill``
-    marks a numeric variable whose ``_FillValue`` attribute is a string, which
-    that parser cannot read."""
+    VirtualiZarr 2.8.0's DMR++ parser drops the first two and the last: it
+    reads every variable as little-endian whatever ``byteOrder`` says, it reads
+    every chunk from the data file even when the chunk's ``href`` puts it
+    elsewhere, and it leaves ``fletcher32`` out of the filters although
+    ``compressionType`` lists it (``checksum_at`` is its position there).
+    ``text_fill`` marks a numeric variable whose ``_FillValue`` attribute is a
+    string, and ``scalar_text`` a string variable with no dimensions; that
+    parser fails the whole group on either."""
     out = {}
     for child in element:
         if child.tag == f"{DAP4}Group":
@@ -37,10 +40,14 @@ def sidecar_notes(element: Any, prefix: str = "") -> dict[str, dict[str, bool]]:
         text_fill = any(
             a.get("name") == "_FillValue" and a.get("type") == "String" for a in child.findall(f"{DAP4}Attribute")
         )
+        declared = (chunks.get("compressionType") or "").split()
         out[f"{prefix}/{child.get('name')}"] = {
+            "checksum_at": declared.index("fletcher32") if "fletcher32" in declared else None,
             "big_endian": chunks.get("byteOrder") == "BE",
             "external": bool(hrefs),
             "text_fill": text_fill and child.tag != f"{DAP4}String",
+            # a string variable with no dimensions, such as HDF-EOS5's StructMetadata_0
+            "scalar_text": child.tag == f"{DAP4}String" and child.find(f"{DAP4}Dim") is None,
         }
     return out
 
@@ -48,7 +55,8 @@ def sidecar_notes(element: Any, prefix: str = "") -> dict[str, dict[str, bool]]:
 def apply_sidecar_notes(
     index: dict[str, Any], meta: dict[str, dict[str, Any]], notes: dict[str, dict[str, bool]]
 ) -> int:
-    """Drop variables stored outside the data file and set the declared byte order; returns how many were dropped."""
+    """Drop variables stored outside the data file, and set the declared byte
+    order and the checksum filter the parser leaves out; returns how many were dropped."""
     external = [name for name, note in notes.items() if note["external"] and (name in index or name in meta)]
     for name in external:
         index.pop(name, None)
@@ -56,6 +64,12 @@ def apply_sidecar_notes(
     for name, note in notes.items():
         if note["big_endian"] and name in meta:
             meta[name] = {**meta[name], "dtype": meta[name]["dtype"].replace("endianness='little'", "endianness='big'")}
+        at = note.get("checksum_at")
+        if at is not None and name in meta and "fletcher32" not in meta[name]["filters"]:
+            # compressionType="shuffle deflate fletcher32": the checksum goes where the sidecar lists it
+            filters = list(meta[name]["filters"])
+            filters.insert(min(at, len(filters)), "fletcher32")
+            meta[name] = {**meta[name], "filters": filters}
     return len(external)
 
 

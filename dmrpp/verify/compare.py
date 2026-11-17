@@ -182,6 +182,28 @@ def unflatten(sidecar_names: set[str], file_names: set[str]) -> dict[str, str]:
     return {name: flat[name] for name in sidecar_names if name in flat}
 
 
+def spelled(name: str) -> str:
+    """A path as a sidecar spells it: anything in a name but letters, digits and
+    underscores becomes an underscore (``Data Fields`` → ``Data_Fields``)."""
+    import re
+
+    return re.sub(r"[^\w/]", "_", name)
+
+
+def match_respelled(sidecar_names: set[str], file_names: set[str]) -> dict[str, str]:
+    """{sidecar name: file name} where the two differ only in how they are
+    spelled (see :func:`spelled`) and the pairing is unambiguous. HDF-EOS5 files
+    name a group ``Data Fields``; their sidecars call it ``Data_Fields``."""
+    candidates: dict[str, list[str]] = defaultdict(list)
+    for name in file_names - sidecar_names:
+        candidates[spelled(name)].append(name)
+    return {
+        name: candidates[spelled(name)][0]
+        for name in sidecar_names - file_names
+        if len(candidates.get(spelled(name), [])) == 1
+    }
+
+
 def match_by_leaf(sidecar_names: set[str], file_names: set[str]) -> dict[str, str]:
     """{sidecar name: file name} by the last part of the name, for HDF4 files.
 
