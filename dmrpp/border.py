@@ -366,15 +366,21 @@ async def run(args: argparse.Namespace) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     borders, probes = out / "borders.csv", out / "probes.jsonl"
-    done = set()
+    # a rerun keeps what was found and searches again where a search failed
+    kept: list[dict[str, str]] = []
     if borders.exists():
         with borders.open() as f:
-            done = {r["concept_id"] for r in csv.DictReader(f)}
+            kept = [r for r in csv.DictReader(f) if r["verdict"] != "error"]
+    done = {r["concept_id"] for r in kept}
     todo = [c for c in chosen(args) if c["concept_id"] not in done]
     print(f"{len(todo)} collections to search ({len(done)} already done)", file=sys.stderr)
-    if not borders.exists():
-        with borders.open("w", newline="") as f:
-            csv.DictWriter(f, fieldnames=FIELDS).writeheader()
+    with borders.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=FIELDS)
+        writer.writeheader()
+        writer.writerows(sorted(kept, key=lambda r: r["short_name"]))
+    if probes.exists():
+        lines = [line for line in probes.read_text().splitlines() if json.loads(line)["concept_id"] in done]
+        probes.write_text("".join(line + "\n" for line in lines))
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
         live = Live(session, token, args.per_host)
         gate = asyncio.Semaphore(args.collections_in_flight)
@@ -410,7 +416,9 @@ def main(argv: list[str] | None = None) -> int:
         "--int16-findings", help="a verdicts.csv: search every collection with a signed 8-bit variable declared Int16"
     )
     p.add_argument(
-        "--out", default=RESULTS, help="borders.csv (one row per collection; a rerun skips those) and probes.jsonl"
+        "--out",
+        default=RESULTS,
+        help="borders.csv (one row per collection; a rerun skips those that were found) and probes.jsonl",
     )
     p.add_argument("--near", type=int, default=5, help="granules next to the border to check on each side")
     p.add_argument("--spread", type=int, default=10, help="granules spaced evenly in time to check on each side")
