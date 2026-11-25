@@ -139,3 +139,15 @@ def test_the_command_writes_a_summary_and_skips_what_is_done(tmp_path, monkeypat
     assert scan.main(args) == 0
     assert asked == [] and len(read(out / "summary.csv")) == 2
     assert "1 collections to scan (1 already done)" in capsys.readouterr().err
+
+
+def test_a_second_scan_into_the_same_directory_refuses_to_start(tmp_path, capsys):
+    import fcntl
+
+    out = tmp_path / "scan"
+    out.mkdir()
+    with (out / ".lock").open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert scan.main(["--short-name", "COLL", "--out", str(out)]) == 2
+    assert "another scan is already writing" in capsys.readouterr().err
+    assert not (out / "summary.csv").exists()

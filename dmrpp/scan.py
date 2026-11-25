@@ -17,7 +17,8 @@ It writes ``<out>/summary.csv``, one row per collection, and
 ``<out>/sidecars/<short_name>.csv.gz``, one row per sidecar. Collections are
 scanned smallest first when the border search's ``borders.csv`` is there to say
 how big they are. A rerun skips the collections in ``summary.csv`` that
-finished and takes up an unfinished one after the last sidecar it wrote. The
+finished and takes up an unfinished one after the last sidecar it wrote. A
+second scan into the same directory refuses to start while one is running. The
 DAAC's temporary credentials last an hour, so a long listing is restarted
 from where it was with new ones.
 
@@ -30,6 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import fcntl
 import gzip
 import shutil
 import sys
@@ -188,6 +190,12 @@ def main(argv: list[str] | None = None) -> int:
 
     out = Path(args.out)
     (out / "sidecars").mkdir(parents=True, exist_ok=True)
+    lock = (out / ".lock").open("w")
+    try:  # two scans appending to the same files would count every sidecar twice
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"another scan is already writing to {out}; wait for it or stop it", file=sys.stderr)
+        return 2
     summary = out / "summary.csv"
     kept: list[dict[str, str]] = []
     if summary.exists():
