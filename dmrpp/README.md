@@ -20,7 +20,8 @@ Results are in `results/dmrpp/`; start with `survey/summary.md`.
 | 1. Survey | `python -m dmrpp.survey run`, then `report` and `sample` | Samples 20 granules from every cloud-hosted HDF-family collection in the inventory (`benchmarks/cost/data/`) and compares each file's Last-Modified with its sidecar's. Finds collections where stale sidecars exist; it cannot say how many. `sample` then lists two granules per collection that has sidecars, flagged or not, for step 3. | Anywhere, with `EARTHDATA_TOKEN`; `report` and `sample` need no network |
 | 2. List | `python -m dmrpp.list_collection` | Lists a collection's whole S3 prefix and pairs every file with its sidecar: the complete list of stale files for that collection. Takes the survey's `collections.csv`. | us-west-2, with an Earthdata login |
 | 3. Verify | `python -m dmrpp.verify` | For a file from either step, reads the chunk index a second way, from the file itself, and compares it with the sidecar chunk by chunk. With `--values`, also compares what Hyrax serves with a direct read. | us-west-2 for `s3`; anywhere with `--transport https`, slower |
-| 4. Border | `python -m dmrpp.border` | For a collection whose oldest and newest sidecars differ in kind (no `dmrpp:version` attribute against one), bisects on start date to the two neighbouring granules where the kind changes, then checks granules next to the border and spread across each side to see whether it is one step change. | Anywhere, with `EARTHDATA_TOKEN` |
+| 4. Border | `python -m dmrpp.border` | For the Int16 fault of OPENDAP/hyrax#17. A sidecar is flagged when it has no `dmrpp:version` attribute and has `fullnamepath` attributes, the mark the faulty sidecars share. Where a collection's oldest sidecars are flagged and its newest are not, bisects on start date to the two neighbouring granules where that changes, then checks granules next to the border and spread across each side to see whether it is one step change. | Anywhere, with `EARTHDATA_TOKEN` |
+| 5. Scan | `python -m dmrpp.scan` | The same flag for every sidecar of a collection: lists the S3 prefix and reads the first 8 KB of each sidecar. A count where step 4 is a sample. | us-west-2, with an Earthdata login |
 
 A timestamp says a file was written after its sidecar. Only step 3 says
 whether the sidecar is wrong: a bulk copy rewrites Last-Modified without
@@ -38,6 +39,7 @@ uv run --extra dmrpp python -m dmrpp.list_collection --collections results/dmrpp
 uv run --extra dmrpp python -m dmrpp.verify stale.csv --min-gap-days 1 --values --out results/dmrpp/verify/stale.csv
 uv run --extra dmrpp python -m dmrpp.verify results/dmrpp/survey/sampled_with_sidecars.csv --provider POCLOUD --out results/dmrpp/verify/podaac.csv
 uv run --extra dmrpp python -m dmrpp.border --int16-findings results/dmrpp/verify/verdicts.csv
+uv run --extra dmrpp python -m dmrpp.scan --int16-findings results/dmrpp/verify/verdicts.csv --out scan
 ```
 
 Each command's `--help` has its options, and for the verifier the meaning
@@ -64,6 +66,7 @@ version's HDF4 decoder; move the pin and the corrections together.
 | `survey.py` | Step 1. |
 | `list_collection.py` | Step 2. |
 | `border.py` | Step 4. |
+| `scan.py` | Step 5. |
 | `verify/cli.py` | Step 3's command line, the verdicts, and which granules to pick from a CSV. |
 | `verify/merge.py` | One verdict per granule from several runs. |
 | `verify/granule.py` | One granule: index the file, read the sidecar, compare. |

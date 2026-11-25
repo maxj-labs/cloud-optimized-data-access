@@ -38,7 +38,7 @@ class FakeArchive:
     async def sidecar(self, granule):
         self.reads.append(granule.concept_id)
         kind = self.kinds[int(granule.concept_id[1:])]
-        return border.Sidecar(kind, "3.21.1-367" if kind == "versioned" else None)
+        return border.Sidecar(kind, "3.21.1-367" if kind == "clear" else None)
 
 
 def search(kinds, near=3, spread=4, **kwargs):
@@ -48,11 +48,11 @@ def search(kinds, near=3, spread=4, **kwargs):
 
 
 def test_a_clean_border_is_found_exactly_and_called_a_step():
-    row, archive, s = search(["unversioned"] * 13_337 + ["versioned"] * 6_663)
+    row, archive, s = search(["flagged"] * 13_337 + ["clear"] * 6_663)
     assert row["verdict"] == "step"
     assert (row["last_old_granule"], row["first_new_granule"]) == ("granule-13336", "granule-13337")
     assert (row["granules"], row["granules_old_side"], row["granules_new_side"]) == (20_000, 13_337, 6_663)
-    assert (row["old_kind"], row["new_kind"], row["new_version"]) == ("unversioned", "versioned", "3.21.1-367")
+    assert (row["old_kind"], row["new_kind"], row["new_version"]) == ("flagged", "clear", "3.21.1-367")
     assert row["unreadable_between"] == 0
     # three next to the border and four spread out, on each side
     assert (row["old_side_checked"], row["new_side_checked"]) == (7, 7)
@@ -67,39 +67,39 @@ def test_a_clean_border_is_found_exactly_and_called_a_step():
 
 
 def test_the_border_can_be_at_either_edge_of_the_collection():
-    row, _, _ = search(["unversioned"] + ["versioned"] * 2_999)
+    row, _, _ = search(["flagged"] + ["clear"] * 2_999)
     assert (row["verdict"], row["granules_old_side"], row["first_new_granule"]) == ("step", 1, "granule-1")
-    row, _, _ = search(["unversioned"] * 2_999 + ["versioned"])
+    row, _, _ = search(["flagged"] * 2_999 + ["clear"])
     assert (row["verdict"], row["granules_old_side"], row["last_old_granule"]) == ("step", 2_999, "granule-2998")
 
 
 def test_an_island_of_the_other_kind_on_one_side_is_not_a_step():
     # old sidecars again in the second half of the new side: reprocessing out of order
-    kinds = ["unversioned"] * 4_000 + ["versioned"] * 2_000 + ["unversioned"] * 1_500 + ["versioned"] * 500
+    kinds = ["flagged"] * 4_000 + ["clear"] * 2_000 + ["flagged"] * 1_500 + ["clear"] * 500
     row, _, _ = search(kinds, spread=8)
     assert row["verdict"] == "not_a_step"
     assert row["old_side_disagree"] + row["new_side_disagree"] > 0
-    assert "is unversioned" in row["disagreeing"] or "is versioned" in row["disagreeing"]
+    assert "is flagged" in row["disagreeing"] or "is clear" in row["disagreeing"]
 
 
 def test_an_exception_next_to_the_border_is_not_a_step():
-    kinds = ["unversioned"] * 3_000 + ["versioned"] * 3_000
-    kinds[2_998] = "versioned"
+    kinds = ["flagged"] * 3_000 + ["clear"] * 3_000
+    kinds[2_998] = "clear"
     row, _, _ = search(kinds)
     assert row["verdict"] == "not_a_step"
     assert row["old_side_disagree"] == 1 and "granule-2998" in row["disagreeing"]
 
 
 def test_ends_that_agree_are_checked_across_the_whole_collection():
-    row, archive, _ = search(["unversioned"] * 5_000)
-    assert (row["verdict"], row["old_side_checked"], row["old_side_disagree"]) == ("all_unversioned", 8, 0)
+    row, archive, _ = search(["flagged"] * 5_000)
+    assert (row["verdict"], row["old_side_checked"], row["old_side_disagree"]) == ("all_flagged", 8, 0)
     assert "last_old_granule" not in row
-    row, _, _ = search(["versioned"] * 2_000 + ["unversioned"] * 1_000 + ["versioned"] * 2_000)
+    row, _, _ = search(["clear"] * 2_000 + ["flagged"] * 1_000 + ["clear"] * 2_000)
     assert row["verdict"] == "mixed" and row["old_side_disagree"] > 0
 
 
 def test_granules_without_a_sidecar_are_stepped_over():
-    kinds = ["unversioned"] * 1_000 + ["none"] * 7 + ["versioned"] * 1_000
+    kinds = ["flagged"] * 1_000 + ["none"] * 7 + ["clear"] * 1_000
     kinds[0] = kinds[-1] = "none"  # the ends too
     kinds[500] = "unreadable"
     row, _, _ = search(kinds)
@@ -110,7 +110,7 @@ def test_granules_without_a_sidecar_are_stepped_over():
 
 def test_granules_longer_than_their_spacing_do_not_move_the_border():
     # each granule overlaps the next 30: a temporal search returns many that start before its window
-    row, _, _ = search(["unversioned"] * 4_321 + ["versioned"] * 3_000, length=timedelta(hours=30))
+    row, _, _ = search(["flagged"] * 4_321 + ["clear"] * 3_000, length=timedelta(hours=30))
     assert (row["verdict"], row["last_old_granule"], row["first_new_granule"]) == (
         "step",
         "granule-4320",
@@ -126,15 +126,19 @@ def test_a_collection_with_no_sidecars_says_so():
 
 def test_reading_a_sidecar_prefix():
     head = b'<?xml version="1.0" encoding="ISO-8859-1"?>\n<Dataset xmlns="http://xml.opendap.org/ns/DAP/4.0#"'
+    mark = b'<Int16 name="mask"><Attribute name="fullnamepath" type="String"><Value>/mask</Value></Attribute>'
+    plain = b'<Int8 name="mask"><Attribute name="long_name" type="String"><Value>mask</Value></Attribute>'
 
     def stat(status, body=b""):
         return {"status": status, "body": body, "last_modified": "2024-07-17T11:24:22+00:00", "size": 1}
 
-    assert border.read_sidecar(stat(206, head + b' dmrpp:version="3.20.13-310">')).kind == "versioned"
-    assert border.read_sidecar(stat(206, head + b' dmrpp:version="3.20.13-310">')).version == "3.20.13-310"
-    assert border.read_sidecar(stat(206, head + b' name="a.nc">')) == border.Sidecar(
-        "unversioned", None, "2024-07-17T11:24:22+00:00", 206
+    # the mark of the fault is both things: no version, and fullnamepath attributes
+    assert border.read_sidecar(stat(206, head + b' name="a.nc">' + mark)) == border.Sidecar(
+        "flagged", None, True, "2024-07-17T11:24:22+00:00", 206
     )
+    assert border.read_sidecar(stat(206, head + b' name="a.nc">' + plain)).kind == "clear"
+    versioned = border.read_sidecar(stat(206, head + b' dmrpp:version="3.20.13-310">' + mark))
+    assert (versioned.kind, versioned.version, versioned.fullnamepath) == ("clear", "3.20.13-310", True)
     assert border.read_sidecar(stat(404)).kind == "none"
     assert border.read_sidecar(stat(200, b"<!DOCTYPE html><html>404 - Not Found</html>")).kind == "none"
     assert border.read_sidecar(stat("login-redirect")).kind == "unreadable"

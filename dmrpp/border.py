@@ -1,9 +1,16 @@
-"""Where in a collection the sidecars change from one generator to another.
+"""Where in a collection the sidecars stop carrying the mark of the Int16 fault.
+
+Older DMR++ sidecars at PO.DAAC declare signed 8-bit variables as ``Int16``
+(OPENDAP/hyrax#17). Every such sidecar seen has no ``dmrpp:version``
+attribute on its Dataset element and has ``fullnamepath`` attributes on its
+variables. A sidecar with both is "flagged" here; any other is "clear". The
+first 8 KB of a sidecar decide it: the first variable's attributes are within
+the first 3 KB of every sidecar this was tried on.
 
 The survey reads a few sidecars at each end of a collection. When the oldest
-granules have sidecars with no ``dmrpp:version`` attribute and the newest have
-one, somewhere in between is a border. This script finds it and then tests
-whether it is a border at all:
+granules have flagged sidecars and the newest have clear ones, somewhere in
+between is a border. This script finds it and then tests whether it is a
+border at all:
 
 1. reads the sidecar of the oldest and of the newest granule (by start date);
 2. if they differ, bisects on start date until it holds two neighbouring
@@ -16,13 +23,12 @@ whether it is a border at all:
    there is nothing to bisect, and the spread check runs across the whole
    collection instead.
 
-A sidecar is "unversioned" when its Dataset element has no ``dmrpp:version``,
-else "versioned". One read of a sidecar's first bytes decides it.
-
 It is still a sample. A step verdict says the granules checked agree with a
 single border; ``granules_old_side`` is CMR's count of granules that start no
-later than the last granule on the old side, which is the number of sidecars
-of the old kind only if the step holds everywhere.
+later than the last granule on the old side, which is the number of flagged
+sidecars only if the step holds everywhere. ``python -m dmrpp.scan`` reads
+every sidecar instead, from inside us-west-2. Nor does a flag say a sidecar
+is wrong: that is the verifier's comparison with the file.
 
 Needs ``EARTHDATA_TOKEN``. About 25 CMR searches and 60 sidecar reads per
 collection with the defaults.
@@ -45,7 +51,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from dmrpp.common import CMR
-from dmrpp.survey import SIDECAR_PREFIX_BYTES, VERSION, data_and_sidecar, is_sidecar
+from dmrpp.survey import VERSION, data_and_sidecar, is_sidecar
 
 RESULTS = "results/dmrpp/border"
 COLLECTIONS = "results/dmrpp/survey/collections.csv"
@@ -53,7 +59,9 @@ USER_AGENT = "dmrpp-border/0.1"
 LIST_MAX = 500  # a time window with this many granules or fewer is listed and bisected by position
 PICK = 10  # granules asked for when one is wanted: the first few can lack a sidecar or start outside the window
 MAX_STEPS = 60  # halvings of the time window before giving up; 20 years to one second takes 30
-READABLE = ("unversioned", "versioned")
+SIDECAR_HEAD_BYTES = 8192  # the Dataset element and the first variable with its attributes
+MARK = b'name="fullnamepath"'
+READABLE = ("flagged", "clear")
 CMR_TIMEOUT_S, CMR_LIST_TIMEOUT_S, CMR_TRIES = 15, 90, 8
 FIELDS = [
     "concept_id", "short_name", "verdict", "granules", "old_kind", "new_kind", "new_version",
@@ -73,8 +81,9 @@ class Granule:
 
 @dataclass(frozen=True)
 class Sidecar:
-    kind: str  # "unversioned" | "versioned" | "none" | "unreadable"
+    kind: str  # "flagged" | "clear" | "none" | "unreadable"
     version: str | None = None
+    fullnamepath: bool | None = None
     last_modified: str | None = None
     status: Any = None
 
@@ -110,6 +119,14 @@ def cmr_time(t: datetime | None) -> str:
     return "" if t is None else t.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.") + f"{t.microsecond // 1000:03d}Z"
 
 
+def flagged(head: bytes) -> tuple[bool, str | None, bool]:
+    """(flagged, dmrpp:version, has fullnamepath attributes) from the start of a sidecar."""
+    found = VERSION.search(head)
+    version = found.group(1).decode() if found else None
+    marked = MARK in head
+    return version is None and marked, version, marked
+
+
 def read_sidecar(stat: dict[str, Any]) -> Sidecar:
     """What a ranged read of a sidecar's first bytes says about it."""
     if stat["status"] == 404:
@@ -118,13 +135,8 @@ def read_sidecar(stat: dict[str, Any]) -> Sidecar:
         return Sidecar("unreadable", status=stat["status"])
     if not is_sidecar(stat["body"]):
         return Sidecar("none", status=f"{stat['status']}, not a DMR++ document")
-    version = VERSION.search(stat["body"])
-    return Sidecar(
-        "versioned" if version else "unversioned",
-        version.group(1).decode() if version else None,
-        stat["last_modified"],
-        stat["status"],
-    )
+    flag, version, marked = flagged(stat["body"])
+    return Sidecar("flagged" if flag else "clear", version, marked, stat["last_modified"], stat["status"])
 
 
 class Search:
@@ -158,6 +170,7 @@ class Search:
                     "role": role,
                     "kind": sidecar.kind,
                     "dmrpp_version": sidecar.version,
+                    "fullnamepath": sidecar.fullnamepath,
                     "dmrpp_last_modified": sidecar.last_modified,
                     "dmrpp_status": sidecar.status,
                     "dmrpp_url": granule.sidecar_url,
@@ -340,7 +353,7 @@ class Live:
         raise RuntimeError(f"CMR did not answer a search of {collection} in {CMR_TRIES} tries")
 
     async def sidecar(self, granule: Granule) -> Sidecar:
-        return read_sidecar(await self.prober.stat(granule.sidecar_url, SIDECAR_PREFIX_BYTES))
+        return read_sidecar(await self.prober.stat(granule.sidecar_url, SIDECAR_HEAD_BYTES))
 
 
 def chosen(args: argparse.Namespace) -> list[dict[str, str]]:
