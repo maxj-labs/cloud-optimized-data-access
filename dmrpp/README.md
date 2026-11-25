@@ -54,7 +54,7 @@ version's HDF4 decoder; move the pin and the corrections together.
 
 | Path | What |
 |---|---|
-| `results/dmrpp/survey/` | The survey of 2026-11-13: `granules.jsonl.gz` (one row per sampled granule), and the three files `report` and the one file `sample` derive from it. It stopped at 3,941 of 5,617 collections; `run` resumes where it left off. |
+| `results/dmrpp/survey/` | The survey of 2026-11-13: `granules.jsonl.gz` (one row per sampled granule), and the three files `report` and the one file `sample` derive from it. It stopped at 3,941 of 5,617 collections on 2026-11-13; the 251 PO.DAAC collections left were added on 2026-11-24, which makes 4,192. `run` resumes where it left off. |
 | `results/dmrpp/verify/` | `verdicts.csv`: one row per granule with its newest verdict, and the run it came from. `python -m dmrpp.verify.merge` folds a new run in. Its README says which rows are findings and which are the verifier's limits. |
 | `results/dmrpp/border/` | `borders.csv`: one row per collection searched, with the granules either side of the border and the step check. `probes.jsonl`: every sidecar read on the way. Its README says how to read them. |
 

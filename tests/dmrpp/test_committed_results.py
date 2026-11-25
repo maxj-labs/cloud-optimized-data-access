@@ -40,5 +40,5 @@ def test_the_committed_inventory_is_the_one_the_survey_sampled_from():
     in_inventory = {row["concept_id"] for row in todo}
     with (SURVEY / "collections.csv").open() as f:
         surveyed = {row["concept_id"] for row in csv.DictReader(f)}
-    assert len(surveyed) == 3941 and surveyed <= in_inventory
+    assert len(surveyed) == 4192 and surveyed <= in_inventory
     assert len(stale.candidates(INVENTORY, {"POCLOUD"})) < len(todo)
