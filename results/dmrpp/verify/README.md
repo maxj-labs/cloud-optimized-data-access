@@ -24,7 +24,7 @@ Not every row is a finding about a sidecar. As of 2026-11-16:
 
 | Rows | What they are |
 |---|---|
-| `METADATA_MISMATCH` with `int8_declared_int16` above 0 (53, all PO.DAAC) | A finding: the sidecar declares signed 8-bit variables as `Int16`. Reported as OPENDAP/hyrax#17. |
+| `METADATA_MISMATCH` with `int8_declared_int16` above 0 (71 granules in 53 collections, all PO.DAAC; 18 granules in 14 collections were added on 2026-11-24, when the survey reached the rest of PO.DAAC) | A finding: the sidecar declares signed 8-bit variables as `Int16`. Reported as OPENDAP/hyrax#17. |
 | `MISMATCH`, `TELLUS_GLDAS-NOAH-3.3_TWS-ANOMALY_MONTHLY` | A finding: the file was replaced and the sidecar was not rebuilt. |
 | `METADATA_MISMATCH`, `OMCLDO2` and `OMDOAO3` (2) | A finding: the sidecar declares the `nTimes` dimension as 1 where the data has 1,644 rows. |
 | `METADATA_MISMATCH` listing `deflate` twice (11) | The sidecar lists the filter twice where the file has it once. Not checked for an effect on values. |
